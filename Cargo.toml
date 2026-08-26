@@ -1,0 +1,42 @@
+[workspace]
+members = [".", "gui"]
+resolver = "2"
+
+[package]
+name = "img2omezarr"
+version = "0.1.0"
+edition = "2021"
+description = "Rust image to OME-Zarr converter"
+license = "MIT"
+
+[features]
+default = []
+core-bioformats = ["dep:bioformats-rs"]
+cli = ["core-bioformats", "dep:clap", "dep:tracing-subscriber"]
+gui = ["core-bioformats"]
+upload-s3 = ["dep:object_store", "dep:tokio"]
+
+[dependencies]
+anyhow = "1"
+bioformats-rs = { git = "https://github.com/henriksson-lab/bioformats-rs.git", package = "bioformats", optional = true }
+bytemuck = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+ndarray = "0.17"
+num-traits = "0.2"
+object_store = { version = "0.12", features = ["aws"], optional = true }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+zarrs = { version = "0.23", features = ["filesystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "img2omezarr"
+path = "src/bin/img2omezarr.rs"
+required-features = ["cli"]

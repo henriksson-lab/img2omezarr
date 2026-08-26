@@ -1,0 +1,291 @@
+import {
+    Button,
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    ProgressIndicator,
+    ScrollView,
+    SpinBox,
+} from "std-widgets.slint";
+
+export struct QueueFile {
+    path: string,
+    status: string,
+}
+
+component FileRow inherits Rectangle {
+    in property <QueueFile> file;
+    in property <int> index;
+    in property <bool> running;
+    callback remove(int);
+    callback move-file(int, int);
+
+    height: 34px;
+    width: 100%;
+    border-width: 1px;
+    border-color: #d0d5dd;
+    background: #ffffff;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 8px;
+        Text {
+            text: file.path;
+            vertical-alignment: center;
+            color: #101828;
+            overflow: elide;
+        }
+        Text {
+            text: file.status;
+            width: 82px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            color: #475467;
+        }
+        Button {
+            text: "Up";
+            width: 48px;
+            enabled: !root.running && root.index > 0;
+            clicked => { root.move-file(index, -1); }
+        }
+        Button {
+            text: "Down";
+            width: 62px;
+            enabled: !root.running;
+            clicked => { root.move-file(index, 1); }
+        }
+        Button {
+            text: "Remove";
+            width: 86px;
+            enabled: !root.running;
+            clicked => { root.remove(index); }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Bio-Formats to OME-Zarr";
+    width: 980px;
+    height: 660px;
+
+    in-out property <[QueueFile]> files: [];
+    in-out property <string> output-dir: "";
+    in-out property <string> ngff-version: "0.5";
+    in-out property <int> tile-width: 1024;
+    in-out property <int> tile-height: 1024;
+    in-out property <int> chunk-depth: 1;
+    in-out property <int> target-min-size: 256;
+    in-out property <bool> use-existing-resolutions: false;
+    in-out property <string> downsampling: "nearest";
+    in-out property <string> compression: "zstd";
+    in-out property <int> compression-level: 3;
+    in-out property <bool> overwrite: false;
+    in-out property <bool> write-omero: true;
+    in-out property <bool> staged-upload: false;
+    in-out property <string> upload-mode: "local";
+    in-out property <string> s3-bucket: "";
+    in-out property <string> s3-prefix: "";
+    in-out property <string> s3-region: "";
+    in-out property <string> s3-endpoint: "";
+    in-out property <bool> running: false;
+    in-out property <float> progress: -1;
+    in-out property <string> progress-label: "";
+    in-out property <string> log-text: "";
+
+    callback add-files();
+    callback files-dropped(data-transfer);
+    callback remove-file(int);
+    callback move-file(int, int);
+    callback pick-output();
+    callback start-upload();
+
+    background: #f6f7f9;
+
+    HorizontalLayout {
+        padding: 18px;
+        spacing: 16px;
+
+        VerticalLayout {
+            spacing: 10px;
+            Rectangle {
+                height: 44px;
+                background: transparent;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "Add Images";
+                        enabled: !root.running;
+                        clicked => { root.add-files(); }
+                    }
+                    Button {
+                        text: "Output Folder";
+                        enabled: !root.running && root.upload-mode == "local";
+                        clicked => { root.pick-output(); }
+                    }
+                    Text {
+                        text: root.output-dir;
+                        vertical-alignment: center;
+                        color: #475467;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            Rectangle {
+                border-width: 1px;
+                border-color: drop-target.has-drag ? #1570ef : #d0d5dd;
+                background: drop-target.has-drag ? #eff8ff : #ffffff;
+                vertical-stretch: 1;
+                ScrollView {
+                    viewport-width: parent.width;
+                    viewport-height: parent.height;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+                        for file[i] in root.files: FileRow {
+                            file: file;
+                            index: i;
+                            running: root.running;
+                            remove(index) => { root.remove-file(index); }
+                            move-file(index, delta) => { root.move-file(index, delta); }
+                        }
+                    }
+                }
+                drop-target := DropArea {
+                    enabled: !root.running;
+                    width: parent.width;
+                    height: parent.height;
+                    can-drop(event) => {
+                        DragAction.copy
+                    }
+                    dropped(event) => {
+                        root.files-dropped(event.data);
+                        DragAction.copy
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 86px;
+                background: transparent;
+                VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: root.progress-label;
+                        color: #344054;
+                    }
+                    ProgressIndicator {
+                        indeterminate: root.running && root.progress < 0;
+                        progress: max(0.0, root.progress);
+                    }
+                    Button {
+                        text: root.upload-mode == "s3" || root.staged-upload ? "Upload" : "Convert";
+                        enabled: !root.running;
+                        clicked => { root.start-upload(); }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            width: 310px;
+            border-width: 1px;
+            border-color: #d0d5dd;
+            background: #ffffff;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 12px;
+                Text {
+                    text: "Settings";
+                    font-size: 18px;
+                    color: #101828;
+                }
+                Text { text: "OME-Zarr"; color: #344054; }
+                ComboBox {
+                    model: ["0.5", "0.4"];
+                    current-value: root.ngff-version;
+                    selected(value) => { root.ngff-version = value; }
+                }
+                Text { text: "Tile Width"; color: #344054; }
+                SpinBox { value <=> root.tile-width; minimum: 1; maximum: 8192; }
+                Text { text: "Tile Height"; color: #344054; }
+                SpinBox { value <=> root.tile-height; minimum: 1; maximum: 8192; }
+                Text { text: "Chunk Depth"; color: #344054; }
+                SpinBox { value <=> root.chunk-depth; minimum: 1; maximum: 1024; }
+                Text { text: "Target Min Size"; color: #344054; }
+                SpinBox { value <=> root.target-min-size; minimum: 1; maximum: 8192; }
+                CheckBox {
+                    text: "Use source pyramid";
+                    checked: root.use-existing-resolutions;
+                    toggled => { root.use-existing-resolutions = self.checked; }
+                }
+                Text { text: "Downsampling"; color: #344054; }
+                ComboBox {
+                    model: ["nearest", "average"];
+                    current-value: root.downsampling;
+                    selected(value) => { root.downsampling = value; }
+                }
+                Text { text: "Compression"; color: #344054; }
+                ComboBox {
+                    model: ["zstd", "blosc", "none"];
+                    current-value: root.compression;
+                    selected(value) => { root.compression = value; }
+                }
+                Text { text: "Compression Level"; color: #344054; }
+                SpinBox { value <=> root.compression-level; minimum: -7; maximum: 22; }
+                CheckBox {
+                    text: "Overwrite";
+                    checked: root.overwrite;
+                    toggled => { root.overwrite = self.checked; }
+                }
+                CheckBox {
+                    text: "OMERO metadata";
+                    checked: root.write-omero;
+                    toggled => { root.write-omero = self.checked; }
+                }
+                CheckBox {
+                    text: "Staged upload";
+                    checked: root.staged-upload;
+                    toggled => { root.staged-upload = self.checked; }
+                }
+                Text { text: "Upload Target"; color: #344054; }
+                ComboBox {
+                    model: ["local", "s3"];
+                    current-value: root.upload-mode;
+                    selected(value) => { root.upload-mode = value; }
+                }
+                Text { text: "S3 Bucket"; color: #344054; visible: root.upload-mode == "s3"; }
+                LineEdit {
+                    text <=> root.s3-bucket;
+                    visible: root.upload-mode == "s3";
+                    placeholder-text: "bucket";
+                }
+                Text { text: "S3 Prefix"; color: #344054; visible: root.upload-mode == "s3"; }
+                LineEdit {
+                    text <=> root.s3-prefix;
+                    visible: root.upload-mode == "s3";
+                    placeholder-text: "path";
+                }
+                Text { text: "S3 Region"; color: #344054; visible: root.upload-mode == "s3"; }
+                LineEdit {
+                    text <=> root.s3-region;
+                    visible: root.upload-mode == "s3";
+                    placeholder-text: "us-east-1";
+                }
+                Text { text: "S3 Endpoint"; color: #344054; visible: root.upload-mode == "s3"; }
+                LineEdit {
+                    text <=> root.s3-endpoint;
+                    visible: root.upload-mode == "s3";
+                    placeholder-text: "https://...";
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                Text {
+                    text: root.log-text;
+                    color: #475467;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
