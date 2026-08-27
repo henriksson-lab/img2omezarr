@@ -23,5 +23,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build
-        run: cargo build -p img2omezarr --features cli --bin img2omezarr
+      - name: Build CLI
+        run: cargo build -p img2omezarr --features "cli upload-s3" --bin img2omezarr
+
+      - name: Build GUI
+        run: cargo build -p img2omezarr-gui
+
+      - name: Build GUI with S3
+        run: cargo build -p img2omezarr-gui --features upload-s3

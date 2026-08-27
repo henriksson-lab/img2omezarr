@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="790" viewBox="0 0 1180 790" role="img" aria-label="img2omezarr GUI preview">
+  <rect width="1180" height="790" fill="#f6f7f9"/>
+  <rect x="18" y="18" width="820" height="754" fill="#f6f7f9"/>
+  <rect x="856" y="18" width="306" height="754" fill="#ffffff" stroke="#d0d5dd"/>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <rect x="18" y="18" width="820" height="44" fill="transparent"/>
+    <rect x="20" y="20" width="120" height="36" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="80" y="43" text-anchor="middle" font-size="14" fill="#101828">Add Images</text>
+    <rect x="148" y="20" width="132" height="36" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="214" y="43" text-anchor="middle" font-size="14" fill="#101828">Output Folder</text>
+    <text x="296" y="43" font-size="14" fill="#475467">/data/output</text>
+
+    <rect x="18" y="72" width="820" height="584" fill="#ffffff" stroke="#d0d5dd"/>
+    <g>
+      <rect x="26" y="80" width="804" height="34" fill="#ffffff" stroke="#d0d5dd"/>
+      <text x="38" y="102" font-size="14" fill="#101828">/images/cell01.tif</text>
+      <text x="680" y="102" font-size="14" fill="#475467">queued</text>
+      <rect x="738" y="84" width="40" height="26" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+      <text x="758" y="102" text-anchor="middle" font-size="12" fill="#101828">Up</text>
+      <rect x="784" y="84" width="40" height="26" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+      <text x="804" y="102" text-anchor="middle" font-size="12" fill="#101828">Down</text>
+    </g>
+    <g>
+      <rect x="26" y="122" width="804" height="34" fill="#ffffff" stroke="#d0d5dd"/>
+      <text x="38" y="144" font-size="14" fill="#101828">/images/cell02.nd2</text>
+      <text x="680" y="144" font-size="14" fill="#475467">queued</text>
+      <rect x="738" y="126" width="40" height="26" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+      <text x="758" y="144" text-anchor="middle" font-size="12" fill="#101828">Up</text>
+      <rect x="784" y="126" width="40" height="26" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+      <text x="804" y="144" text-anchor="middle" font-size="12" fill="#101828">Down</text>
+    </g>
+
+    <text x="18" y="688" font-size="14" fill="#344054">ready</text>
+    <rect x="18" y="704" width="820" height="8" rx="4" fill="#e4e7ec"/>
+    <rect x="18" y="728" width="92" height="36" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="64" y="751" text-anchor="middle" font-size="14" fill="#101828">Upload</text>
+
+    <text x="870" y="50" font-size="18" fill="#101828">Settings</text>
+    <text x="870" y="84" font-size="14" fill="#344054">OME-Zarr</text>
+    <rect x="870" y="94" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="114" font-size="13" fill="#101828">0.5</text>
+
+    <text x="870" y="150" font-size="14" fill="#344054">Tile Width</text>
+    <rect x="870" y="160" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="180" font-size="13" fill="#101828">1024</text>
+    <text x="870" y="206" font-size="14" fill="#344054">Tile Height</text>
+    <rect x="870" y="216" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="236" font-size="13" fill="#101828">1024</text>
+    <text x="870" y="262" font-size="14" fill="#344054">Compression</text>
+    <rect x="870" y="272" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="292" font-size="13" fill="#101828">zstd</text>
+
+    <rect x="870" y="328" width="14" height="14" fill="#ffffff" stroke="#98a2b3"/>
+    <text x="894" y="340" font-size="14" fill="#344054">Overwrite</text>
+    <rect x="870" y="356" width="14" height="14" fill="#ffffff" stroke="#98a2b3"/>
+    <path d="M873 363 L877 367 L884 358" fill="none" stroke="#1570ef" stroke-width="2"/>
+    <text x="894" y="368" font-size="14" fill="#344054">OMERO metadata</text>
+
+    <text x="870" y="402" font-size="14" fill="#344054">Upload Target</text>
+    <rect x="870" y="412" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="432" font-size="13" fill="#101828">s3</text>
+    <text x="870" y="458" font-size="14" fill="#344054">S3 Profile</text>
+    <rect x="870" y="468" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="488" font-size="13" fill="#101828">lab-minio</text>
+
+    <rect x="870" y="514" width="56" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="898" y="534" text-anchor="middle" font-size="13" fill="#101828">New</text>
+    <rect x="934" y="514" width="58" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="963" y="534" text-anchor="middle" font-size="13" fill="#101828">Save</text>
+    <rect x="1000" y="514" width="68" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="1034" y="534" text-anchor="middle" font-size="13" fill="#101828">Delete</text>
+    <rect x="1076" y="514" width="64" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="1108" y="534" text-anchor="middle" font-size="13" fill="#101828">Test</text>
+
+    <text x="870" y="570" font-size="14" fill="#344054">S3 Bucket</text>
+    <rect x="870" y="580" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="600" font-size="13" fill="#101828">microscopy</text>
+    <text x="870" y="626" font-size="14" fill="#344054">S3 Prefix</text>
+    <rect x="870" y="636" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="656" font-size="13" fill="#101828">runs/2026-08</text>
+    <text x="870" y="682" font-size="14" fill="#344054">S3 Endpoint</text>
+    <rect x="870" y="692" width="270" height="30" rx="4" fill="#ffffff" stroke="#b8c0cc"/>
+    <text x="884" y="712" font-size="13" fill="#101828">https://minio.example.org</text>
+  </g>
+</svg>

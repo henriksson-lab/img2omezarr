@@ -49,13 +49,33 @@ pub fn finish_output_target(local_output: &Path, target: &OutputTarget) -> anyho
             prefix,
             region,
             endpoint,
-            profile,
+            credentials,
         }) => {
-            upload_dir_to_s3(local_output, bucket, prefix, region, endpoint, profile)?;
+            upload_dir_to_s3(local_output, bucket, prefix, region, endpoint, credentials)?;
             fs::remove_dir_all(local_output).ok();
             Ok(())
         }
     }
+}
+
+#[cfg(feature = "upload-s3")]
+pub fn test_s3_connection(
+    bucket: &str,
+    prefix: &str,
+    region: &Option<String>,
+    endpoint: &Option<String>,
+    credentials: &Option<crate::convert::config::S3Credentials>,
+) -> anyhow::Result<()> {
+    let store = s3_store(bucket, region, endpoint, credentials)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let prefix = prefix.trim_matches('/');
+    let prefix = if prefix.is_empty() {
+        None
+    } else {
+        Some(ObjectPath::from(prefix))
+    };
+    runtime.block_on(store.list_with_delimiter(prefix.as_ref()))?;
+    Ok(())
 }
 
 fn temp_output_path() -> anyhow::Result<PathBuf> {
@@ -90,13 +110,26 @@ fn upload_dir_to_s3(
     prefix: &str,
     region: &Option<String>,
     endpoint: &Option<String>,
-    profile: &Option<String>,
+    credentials: &Option<crate::convert::config::S3Credentials>,
 ) -> anyhow::Result<()> {
-    if profile.is_some() {
-        anyhow::bail!(
-            "AWS profile selection is not supported by object_store 0.12; set AWS_* environment variables instead"
-        );
+    let store = s3_store(bucket, region, endpoint, credentials)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    for file in list_files(local_output)? {
+        let relative = file.strip_prefix(local_output)?;
+        let key = join_object_key(prefix, relative);
+        let bytes = fs::read(&file)?;
+        runtime.block_on(store.put(&ObjectPath::from(key), bytes.into()))?;
     }
+    Ok(())
+}
+
+#[cfg(feature = "upload-s3")]
+fn s3_store(
+    bucket: &str,
+    region: &Option<String>,
+    endpoint: &Option<String>,
+    credentials: &Option<crate::convert::config::S3Credentials>,
+) -> anyhow::Result<impl ObjectStore> {
     let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
     if let Some(region) = region {
         builder = builder.with_region(region);
@@ -107,16 +140,16 @@ fn upload_dir_to_s3(
             builder = builder.with_allow_http(true);
         }
     }
-
-    let store = builder.build()?;
-    let runtime = tokio::runtime::Runtime::new()?;
-    for file in list_files(local_output)? {
-        let relative = file.strip_prefix(local_output)?;
-        let key = join_object_key(prefix, relative);
-        let bytes = fs::read(&file)?;
-        runtime.block_on(store.put(&ObjectPath::from(key), bytes.into()))?;
+    if let Some(credentials) = credentials {
+        builder = builder
+            .with_access_key_id(&credentials.access_key_id)
+            .with_secret_access_key(&credentials.secret_access_key);
+        if let Some(token) = &credentials.session_token {
+            builder = builder.with_token(token);
+        }
     }
-    Ok(())
+
+    Ok(builder.build()?)
 }
 
 #[cfg(feature = "upload-s3")]

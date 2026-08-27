@@ -21,8 +21,16 @@ pub enum UploadTarget {
         prefix: String,
         region: Option<String>,
         endpoint: Option<String>,
-        profile: Option<String>,
+        credentials: Option<S3Credentials>,
     },
+}
+
+#[cfg(feature = "upload-s3")]
+#[derive(Debug, Clone)]
+pub struct S3Credentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

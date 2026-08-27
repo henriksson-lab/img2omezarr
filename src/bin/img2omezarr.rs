@@ -284,7 +284,7 @@ fn s3_output_target(
         endpoint: s3_endpoint
             .map(str::to_string)
             .or_else(|| std::env::var("AWS_ENDPOINT_URL").ok()),
-        profile: None,
+        credentials: None,
     })))
 }
 

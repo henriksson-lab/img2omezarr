@@ -11,9 +11,13 @@ upload-s3 = ["img2omezarr/upload-s3"]
 
 [dependencies]
 anyhow = "1"
+directories = "6"
 img2omezarr = { path = "..", features = ["core-bioformats"] }
+keyring = "4"
 rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
 slint = "1.17"
+toml = "0.9"
 
 [build-dependencies]
 slint-build = "1.17"

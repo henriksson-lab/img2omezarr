@@ -65,7 +65,7 @@ component FileRow inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "Bio-Formats to OME-Zarr";
+    title: "img2omezarr";
     width: 980px;
     height: 660px;
 
@@ -84,10 +84,14 @@ export component AppWindow inherits Window {
     in-out property <bool> write-omero: true;
     in-out property <bool> staged-upload: false;
     in-out property <string> upload-mode: "local";
+    in-out property <[string]> s3-profile-names: [];
+    in-out property <string> s3-profile: "";
     in-out property <string> s3-bucket: "";
     in-out property <string> s3-prefix: "";
     in-out property <string> s3-region: "";
     in-out property <string> s3-endpoint: "";
+    in-out property <string> s3-access-key-id: "";
+    in-out property <string> s3-secret-access-key: "";
     in-out property <bool> running: false;
     in-out property <float> progress: -1;
     in-out property <string> progress-label: "";
@@ -99,6 +103,11 @@ export component AppWindow inherits Window {
     callback move-file(int, int);
     callback pick-output();
     callback start-upload();
+    callback s3-profile-selected(string);
+    callback new-s3-profile();
+    callback save-s3-profile();
+    callback delete-s3-profile();
+    callback test-s3-profile();
 
     background: #f6f7f9;
 
@@ -193,97 +202,153 @@ export component AppWindow inherits Window {
             border-width: 1px;
             border-color: #d0d5dd;
             background: #ffffff;
-            VerticalLayout {
-                padding: 14px;
-                spacing: 12px;
-                Text {
-                    text: "Settings";
-                    font-size: 18px;
-                    color: #101828;
-                }
-                Text { text: "OME-Zarr"; color: #344054; }
-                ComboBox {
-                    model: ["0.5", "0.4"];
-                    current-value: root.ngff-version;
-                    selected(value) => { root.ngff-version = value; }
-                }
-                Text { text: "Tile Width"; color: #344054; }
-                SpinBox { value <=> root.tile-width; minimum: 1; maximum: 8192; }
-                Text { text: "Tile Height"; color: #344054; }
-                SpinBox { value <=> root.tile-height; minimum: 1; maximum: 8192; }
-                Text { text: "Chunk Depth"; color: #344054; }
-                SpinBox { value <=> root.chunk-depth; minimum: 1; maximum: 1024; }
-                Text { text: "Target Min Size"; color: #344054; }
-                SpinBox { value <=> root.target-min-size; minimum: 1; maximum: 8192; }
-                CheckBox {
-                    text: "Use source pyramid";
-                    checked: root.use-existing-resolutions;
-                    toggled => { root.use-existing-resolutions = self.checked; }
-                }
-                Text { text: "Downsampling"; color: #344054; }
-                ComboBox {
-                    model: ["nearest", "average"];
-                    current-value: root.downsampling;
-                    selected(value) => { root.downsampling = value; }
-                }
-                Text { text: "Compression"; color: #344054; }
-                ComboBox {
-                    model: ["zstd", "blosc", "none"];
-                    current-value: root.compression;
-                    selected(value) => { root.compression = value; }
-                }
-                Text { text: "Compression Level"; color: #344054; }
-                SpinBox { value <=> root.compression-level; minimum: -7; maximum: 22; }
-                CheckBox {
-                    text: "Overwrite";
-                    checked: root.overwrite;
-                    toggled => { root.overwrite = self.checked; }
-                }
-                CheckBox {
-                    text: "OMERO metadata";
-                    checked: root.write-omero;
-                    toggled => { root.write-omero = self.checked; }
-                }
-                CheckBox {
-                    text: "Staged upload";
-                    checked: root.staged-upload;
-                    toggled => { root.staged-upload = self.checked; }
-                }
-                Text { text: "Upload Target"; color: #344054; }
-                ComboBox {
-                    model: ["local", "s3"];
-                    current-value: root.upload-mode;
-                    selected(value) => { root.upload-mode = value; }
-                }
-                Text { text: "S3 Bucket"; color: #344054; visible: root.upload-mode == "s3"; }
-                LineEdit {
-                    text <=> root.s3-bucket;
-                    visible: root.upload-mode == "s3";
-                    placeholder-text: "bucket";
-                }
-                Text { text: "S3 Prefix"; color: #344054; visible: root.upload-mode == "s3"; }
-                LineEdit {
-                    text <=> root.s3-prefix;
-                    visible: root.upload-mode == "s3";
-                    placeholder-text: "path";
-                }
-                Text { text: "S3 Region"; color: #344054; visible: root.upload-mode == "s3"; }
-                LineEdit {
-                    text <=> root.s3-region;
-                    visible: root.upload-mode == "s3";
-                    placeholder-text: "us-east-1";
-                }
-                Text { text: "S3 Endpoint"; color: #344054; visible: root.upload-mode == "s3"; }
-                LineEdit {
-                    text <=> root.s3-endpoint;
-                    visible: root.upload-mode == "s3";
-                    placeholder-text: "https://...";
-                }
-                Rectangle { vertical-stretch: 1; background: transparent; }
-                Text {
-                    text: root.log-text;
-                    color: #475467;
-                    wrap: word-wrap;
+            ScrollView {
+                viewport-width: parent.width;
+                viewport-height: parent.height;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 12px;
+                    Text {
+                        text: "Settings";
+                        font-size: 18px;
+                        color: #101828;
+                    }
+                    Text { text: "OME-Zarr"; color: #344054; }
+                    ComboBox {
+                        model: ["0.5", "0.4"];
+                        current-value: root.ngff-version;
+                        selected(value) => { root.ngff-version = value; }
+                    }
+                    Text { text: "Tile Width"; color: #344054; }
+                    SpinBox { value <=> root.tile-width; minimum: 1; maximum: 8192; }
+                    Text { text: "Tile Height"; color: #344054; }
+                    SpinBox { value <=> root.tile-height; minimum: 1; maximum: 8192; }
+                    Text { text: "Chunk Depth"; color: #344054; }
+                    SpinBox { value <=> root.chunk-depth; minimum: 1; maximum: 1024; }
+                    Text { text: "Target Min Size"; color: #344054; }
+                    SpinBox { value <=> root.target-min-size; minimum: 1; maximum: 8192; }
+                    CheckBox {
+                        text: "Use source pyramid";
+                        checked: root.use-existing-resolutions;
+                        toggled => { root.use-existing-resolutions = self.checked; }
+                    }
+                    Text { text: "Downsampling"; color: #344054; }
+                    ComboBox {
+                        model: ["nearest", "average"];
+                        current-value: root.downsampling;
+                        selected(value) => { root.downsampling = value; }
+                    }
+                    Text { text: "Compression"; color: #344054; }
+                    ComboBox {
+                        model: ["zstd", "blosc", "none"];
+                        current-value: root.compression;
+                        selected(value) => { root.compression = value; }
+                    }
+                    Text { text: "Compression Level"; color: #344054; }
+                    SpinBox { value <=> root.compression-level; minimum: -7; maximum: 22; }
+                    CheckBox {
+                        text: "Overwrite";
+                        checked: root.overwrite;
+                        toggled => { root.overwrite = self.checked; }
+                    }
+                    CheckBox {
+                        text: "OMERO metadata";
+                        checked: root.write-omero;
+                        toggled => { root.write-omero = self.checked; }
+                    }
+                    CheckBox {
+                        text: "Staged upload";
+                        checked: root.staged-upload;
+                        toggled => { root.staged-upload = self.checked; }
+                    }
+                    Text { text: "Upload Target"; color: #344054; }
+                    ComboBox {
+                        model: ["local", "s3"];
+                        current-value: root.upload-mode;
+                        selected(value) => { root.upload-mode = value; }
+                    }
+                    Text { text: "S3 Profile"; color: #344054; visible: root.upload-mode == "s3"; }
+                    ComboBox {
+                        model: root.s3-profile-names;
+                        current-value: root.s3-profile;
+                        visible: root.upload-mode == "s3";
+                        selected(value) => {
+                            root.s3-profile = value;
+                            root.s3-profile-selected(value);
+                        }
+                    }
+                    LineEdit {
+                        text <=> root.s3-profile;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "profile name";
+                    }
+                    HorizontalLayout {
+                        visible: root.upload-mode == "s3";
+                        spacing: 6px;
+                        Button {
+                            text: "New";
+                            enabled: !root.running;
+                            clicked => { root.new-s3-profile(); }
+                        }
+                        Button {
+                            text: "Save";
+                            enabled: !root.running;
+                            clicked => { root.save-s3-profile(); }
+                        }
+                        Button {
+                            text: "Delete";
+                            enabled: !root.running;
+                            clicked => { root.delete-s3-profile(); }
+                        }
+                        Button {
+                            text: "Test";
+                            enabled: !root.running;
+                            clicked => { root.test-s3-profile(); }
+                        }
+                    }
+                    Text { text: "S3 Bucket"; color: #344054; visible: root.upload-mode == "s3"; }
+                    LineEdit {
+                        text <=> root.s3-bucket;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "bucket";
+                    }
+                    Text { text: "S3 Prefix"; color: #344054; visible: root.upload-mode == "s3"; }
+                    LineEdit {
+                        text <=> root.s3-prefix;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "path";
+                    }
+                    Text { text: "S3 Region"; color: #344054; visible: root.upload-mode == "s3"; }
+                    LineEdit {
+                        text <=> root.s3-region;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "us-east-1";
+                    }
+                    Text { text: "S3 Endpoint"; color: #344054; visible: root.upload-mode == "s3"; }
+                    LineEdit {
+                        text <=> root.s3-endpoint;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "https://...";
+                    }
+                    Text { text: "S3 Access Key ID"; color: #344054; visible: root.upload-mode == "s3"; }
+                    LineEdit {
+                        text <=> root.s3-access-key-id;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "access key";
+                    }
+                    Text { text: "S3 Secret Access Key"; color: #344054; visible: root.upload-mode == "s3"; }
+                    LineEdit {
+                        text <=> root.s3-secret-access-key;
+                        input-type: InputType.password;
+                        visible: root.upload-mode == "s3";
+                        placeholder-text: "secret key";
+                    }
+                    Rectangle { height: 1px; background: transparent; }
+                    Text {
+                        text: root.log-text;
+                        color: #475467;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }
