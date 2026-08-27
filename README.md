@@ -1,6 +1,7 @@
 # img2omezarr
 
-`img2omezarr` converts microscopy image files to OME-Zarr.
+`img2omezarr` converts microscopy image files to OME-Zarr. It has both a command line user interface and a GUI aimed to make it easy
+for regular users to upload their data to OME-Zarr.
 
 **Testing needed; work in progress**
 
@@ -40,4 +41,4 @@ endpoint, and credentials, then press `Save`.
 
 ## License
 
-MIT
+This code is under MIT. But note that some libraries it depends on are GPL.
