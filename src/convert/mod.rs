@@ -46,6 +46,9 @@ where
 {
     let mut reports = Vec::with_capacity(jobs.len());
     for (index, job) in jobs.into_iter().enumerate() {
+        if progress.is_cancelled() {
+            anyhow::bail!("conversion cancelled");
+        }
         progress.job_started(index, &job.input);
         let report = convert_one(job, settings, progress)?;
         progress.job_finished(index, &report.output);
@@ -74,6 +77,9 @@ where
         jobs.into_par_iter()
             .enumerate()
             .map(|(index, job)| {
+                if progress.is_cancelled() {
+                    anyhow::bail!("conversion cancelled");
+                }
                 progress.job_started(index, &job.input);
                 let result = convert_one(job, settings, progress);
                 if let Ok(report) = &result {
@@ -108,7 +114,7 @@ where
     let local_output = materialize_output_target(&job.output)?;
     let mut source = BioformatsImageSource::open(&job.input)?;
     let series_written = write_omezarr(&mut source, &local_output, settings, progress)?;
-    upload::finish_output_target(&local_output, &job.output)?;
+    upload::finish_output_target(&local_output, &job.output, settings.overwrite)?;
     Ok(ConversionReport {
         input: job.input,
         output: final_output_path(&job.output),
@@ -126,4 +132,36 @@ where
     P: ProgressSink,
 {
     anyhow::bail!("conversion requires the `core-bioformats` feature")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::convert::config::OutputTarget;
+
+    struct CancelledProgress(AtomicBool);
+
+    impl ProgressSink for CancelledProgress {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn conversion_stops_before_starting_job_when_cancelled() {
+        let err = convert_many(
+            vec![ConvertJob {
+                input: PathBuf::from("input.fake"),
+                output: OutputTarget::Local(PathBuf::from("output.ome.zarr")),
+            }],
+            ConversionSettings::default(),
+            CancelledProgress(AtomicBool::new(true)),
+        )
+        .expect_err("cancelled conversion should fail before opening input");
+
+        assert!(err.to_string().contains("conversion cancelled"));
+    }
 }

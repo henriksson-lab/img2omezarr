@@ -6,6 +6,9 @@ pub trait ProgressSink: Send + Sync {
     fn series_started(&self, _series: usize, _levels: usize, _chunks: usize) {}
     fn chunk_finished(&self, _series: usize, _level: usize, _done: usize, _total: usize) {}
     fn message(&self, _message: &str) {}
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

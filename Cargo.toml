@@ -34,9 +34,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 zarrs = { version = "0.23", features = ["filesystem"] }
 
 [dev-dependencies]
+futures = "0.3"
 tempfile = "3"
 
 [[bin]]
 name = "img2omezarr"
 path = "src/bin/img2omezarr.rs"
 required-features = ["cli"]
+
+[[bench]]
+name = "conversion_bench"
+path = "benches/conversion_bench.rs"
+harness = false
+required-features = ["core-bioformats"]

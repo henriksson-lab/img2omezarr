@@ -1,4 +1,8 @@
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use img2omezarr::convert::config::{ConversionSettings, ConvertJob};
 use img2omezarr::convert::progress::ProgressSink;
@@ -9,6 +13,7 @@ use crate::{AppWindow, QueueFile};
 #[derive(Clone)]
 struct GuiProgress {
     window: slint::Weak<AppWindow>,
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl ProgressSink for GuiProgress {
@@ -48,21 +53,28 @@ impl ProgressSink for GuiProgress {
             }
         });
     }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
 }
 
 pub fn start_conversion(
     window: slint::Weak<AppWindow>,
     jobs: Vec<ConvertJob>,
     settings: ConversionSettings,
+    cancel_requested: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
         .name("img2omezarr-convert".into())
         .spawn(move || {
+            cancel_requested.store(false, Ordering::SeqCst);
             let result = img2omezarr::convert::convert_many(
                 jobs,
                 settings,
                 GuiProgress {
                     window: window.clone(),
+                    cancel_requested: Arc::clone(&cancel_requested),
                 },
             );
             let _ = slint::invoke_from_event_loop(move || {
@@ -74,10 +86,19 @@ pub fn start_conversion(
                             append_log(&window, "done");
                         }
                         Err(err) => {
-                            mark_unfinished_failed(&window);
-                            window.set_progress(-1.0);
-                            window.set_progress_label(SharedString::from("failed"));
-                            append_log(&window, &format!("error: {err:#}"));
+                            if cancel_requested.load(Ordering::SeqCst) {
+                                mark_unfinished_cancelled(&window);
+                                window.set_progress(-1.0);
+                                window.set_progress_label(SharedString::from("cancelled"));
+                                append_log(&window, "cancelled");
+                            } else {
+                                mark_unfinished_failed(&window);
+                                window.set_progress(-1.0);
+                                window.set_progress_label(SharedString::from("failed"));
+                                append_log(&window, &format!("error: {err:#}"));
+                                window.set_error_visible(true);
+                                window.set_error_message(SharedString::from(format!("{err:#}")));
+                            }
                         }
                     }
                     window.set_running(false);
@@ -85,6 +106,30 @@ pub fn start_conversion(
             });
         })
         .expect("start conversion thread");
+}
+
+fn mark_unfinished_cancelled(window: &AppWindow) {
+    let files = window.get_files();
+    for index in 0..files.row_count() {
+        let Some(QueueFile {
+            path,
+            output,
+            status,
+        }) = files.row_data(index)
+        else {
+            continue;
+        };
+        if status == SharedString::from("queued") {
+            files.set_row_data(
+                index,
+                QueueFile {
+                    path,
+                    output,
+                    status: SharedString::from("cancelled"),
+                },
+            );
+        }
+    }
 }
 
 fn set_row_status(window: &AppWindow, index: usize, status: &str) {
@@ -99,7 +144,12 @@ fn set_row_status(window: &AppWindow, index: usize, status: &str) {
 fn mark_unfinished_failed(window: &AppWindow) {
     let files = window.get_files();
     for index in 0..files.row_count() {
-        let Some(QueueFile { path, status }) = files.row_data(index) else {
+        let Some(QueueFile {
+            path,
+            output,
+            status,
+        }) = files.row_data(index)
+        else {
             continue;
         };
         if status == SharedString::from("queued") || status == SharedString::from("running") {
@@ -107,6 +157,7 @@ fn mark_unfinished_failed(window: &AppWindow) {
                 index,
                 QueueFile {
                     path,
+                    output,
                     status: SharedString::from("failed"),
                 },
             );

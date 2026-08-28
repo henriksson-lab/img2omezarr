@@ -28,15 +28,23 @@ pub fn final_output_path(target: &OutputTarget) -> PathBuf {
     }
 }
 
-pub fn finish_output_target(local_output: &Path, target: &OutputTarget) -> anyhow::Result<()> {
+pub fn finish_output_target(
+    local_output: &Path,
+    target: &OutputTarget,
+    overwrite: bool,
+) -> anyhow::Result<()> {
     match target {
         OutputTarget::Local(_) => Ok(()),
         OutputTarget::Upload(UploadTarget::Local(path)) => {
             if path.exists() {
-                if path.is_dir() {
-                    fs::remove_dir_all(path)?;
+                if overwrite {
+                    if path.is_dir() {
+                        fs::remove_dir_all(path)?;
+                    } else {
+                        fs::remove_file(path)?;
+                    }
                 } else {
-                    fs::remove_file(path)?;
+                    anyhow::bail!("output already exists: {}", path.display());
                 }
             }
             copy_dir_all(local_output, path)?;
@@ -51,6 +59,9 @@ pub fn finish_output_target(local_output: &Path, target: &OutputTarget) -> anyho
             endpoint,
             credentials,
         }) => {
+            if !overwrite {
+                ensure_s3_target_absent(bucket, prefix, region, endpoint, credentials)?;
+            }
             upload_dir_to_s3(local_output, bucket, prefix, region, endpoint, credentials)?;
             fs::remove_dir_all(local_output).ok();
             Ok(())
@@ -101,6 +112,24 @@ fn copy_dir_all(from: &Path, to: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "upload-s3")]
+fn ensure_s3_target_absent(
+    bucket: &str,
+    prefix: &str,
+    region: &Option<String>,
+    endpoint: &Option<String>,
+    credentials: &Option<crate::convert::config::S3Credentials>,
+) -> anyhow::Result<()> {
+    let store = s3_store(bucket, region, endpoint, credentials)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let root_metadata = join_object_key(prefix, Path::new("zarr.json"));
+    match runtime.block_on(store.head(&ObjectPath::from(root_metadata))) {
+        Ok(_) => anyhow::bail!("output already exists: s3://{bucket}/{prefix}"),
+        Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 #[cfg(feature = "upload-s3")]

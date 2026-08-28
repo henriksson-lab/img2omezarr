@@ -18,6 +18,7 @@ struct Cli {
 enum Command {
     Convert(ConvertArgs),
     Batch(BatchArgs),
+    Inspect(InspectArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -47,6 +48,13 @@ struct BatchArgs {
     inputs: Vec<PathBuf>,
     #[command(flatten)]
     settings: SettingsArgs,
+}
+
+#[derive(Debug, Parser)]
+struct InspectArgs {
+    input: PathBuf,
+    #[arg(long, default_value = "json")]
+    format: InspectFormatArg,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -102,6 +110,12 @@ enum CompressionArg {
 enum DownsamplingArg {
     Nearest,
     Average,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InspectFormatArg {
+    Json,
+    Markdown,
 }
 
 impl From<NgffArg> for NgffVersion {
@@ -235,8 +249,129 @@ fn main() -> anyhow::Result<()> {
                 .collect::<anyhow::Result<Vec<_>>>()?;
             img2omezarr::convert::convert_many(jobs, settings, CliProgress)?;
         }
+        Command::Inspect(args) => inspect_input(&args.input, args.format)?,
     }
     Ok(())
+}
+
+fn inspect_input(input: &std::path::Path, format: InspectFormatArg) -> anyhow::Result<()> {
+    let report = inspect_report(input)?;
+    match format {
+        InspectFormatArg::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        InspectFormatArg::Markdown => print_inspect_markdown(&report),
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct InspectReport {
+    input: String,
+    series_count: usize,
+    series: Vec<InspectSeries>,
+}
+
+#[derive(serde::Serialize)]
+struct InspectSeries {
+    index: usize,
+    size_x: u32,
+    size_y: u32,
+    size_z: u32,
+    size_c: u32,
+    size_t: u32,
+    pixel_type: String,
+    bits_per_pixel: u16,
+    image_count: u32,
+    dimension_order: String,
+    is_rgb: bool,
+    physical_size_x: Option<String>,
+    physical_size_y: Option<String>,
+    physical_size_z: Option<String>,
+    pyramid_levels: usize,
+}
+
+fn inspect_report(input: &std::path::Path) -> anyhow::Result<InspectReport> {
+    let mut source = img2omezarr::convert::reader::BioformatsImageSource::open(input)?;
+    let series_count = source.series_count();
+    let mut series = Vec::with_capacity(series_count);
+    let ome_metadata = source.ome_metadata();
+    for index in 0..series_count {
+        source.set_series(index)?;
+        source.set_resolution(0)?;
+        let meta = source.metadata();
+        let image = ome_metadata.as_ref().and_then(|ome| ome.images.get(index));
+        series.push(InspectSeries {
+            index,
+            size_x: meta.size_x,
+            size_y: meta.size_y,
+            size_z: meta.size_z,
+            size_c: meta.size_c,
+            size_t: meta.size_t,
+            pixel_type: format!("{:?}", meta.pixel_type),
+            bits_per_pixel: meta.bits_per_pixel,
+            image_count: meta.image_count,
+            dimension_order: format!("{:?}", meta.dimension_order),
+            is_rgb: meta.is_rgb,
+            physical_size_x: physical_size_value(
+                image.and_then(|image| image.physical_size_x),
+                &meta,
+                &["physicalSizeX", "physical_size_x"],
+            ),
+            physical_size_y: physical_size_value(
+                image.and_then(|image| image.physical_size_y),
+                &meta,
+                &["physicalSizeY", "physical_size_y"],
+            ),
+            physical_size_z: physical_size_value(
+                image.and_then(|image| image.physical_size_z),
+                &meta,
+                &["physicalSizeZ", "physical_size_z"],
+            ),
+            pyramid_levels: source.resolution_count(),
+        });
+    }
+    Ok(InspectReport {
+        input: input.display().to_string(),
+        series_count,
+        series,
+    })
+}
+
+fn physical_size_value(
+    ome_value: Option<f64>,
+    meta: &bioformats_rs::ImageMetadata,
+    keys: &[&str],
+) -> Option<String> {
+    ome_value.map(|value| value.to_string()).or_else(|| {
+        keys.iter()
+            .find_map(|key| meta.series_metadata.get(*key))
+            .map(|value| format!("{value:?}"))
+    })
+}
+
+fn print_inspect_markdown(report: &InspectReport) {
+    println!("| Series | Dimensions | C | Z | T | Pixel type | Physical sizes | Pyramid levels |");
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for series in &report.series {
+        let physical_sizes = format!(
+            "X={}, Y={}, Z={}",
+            series.physical_size_x.as_deref().unwrap_or("none"),
+            series.physical_size_y.as_deref().unwrap_or("none"),
+            series.physical_size_z.as_deref().unwrap_or("none")
+        );
+        println!(
+            "| {} | {} x {} | {} | {} | {} | {} {}-bit | {} | {} |",
+            series.index,
+            series.size_x,
+            series.size_y,
+            series.size_c,
+            series.size_z,
+            series.size_t,
+            series.pixel_type,
+            series.bits_per_pixel,
+            physical_sizes,
+            series.pyramid_levels
+        );
+    }
 }
 
 fn output_target(

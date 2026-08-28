@@ -23,6 +23,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
       - name: Build CLI
         run: cargo build -p img2omezarr --features "cli upload-s3" --bin img2omezarr
 
@@ -31,3 +35,60 @@ jobs:
 
       - name: Build GUI with S3
         run: cargo build -p img2omezarr-gui --features upload-s3
+
+  s3-integration:
+    name: S3 Integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name img2omezarr-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:9000/minio/health/ready; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs img2omezarr-minio
+          exit 1
+
+      - name: Create MinIO bucket
+        run: |
+          docker run --rm --network host minio/mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
+          docker run --rm --network host minio/mc mb --ignore-existing local/img2omezarr-ci
+
+      - name: Test CLI S3 upload
+        env:
+          IMG2OMEZARR_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+          IMG2OMEZARR_S3_TEST_BUCKET: img2omezarr-ci
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+        run: cargo test -p img2omezarr --features "cli upload-s3" --test s3_minio
+
+      - name: Record S3 benchmark
+        env:
+          IMG2OMEZARR_S3_BENCH_ENDPOINT: http://127.0.0.1:9000
+          IMG2OMEZARR_S3_BENCH_BUCKET: img2omezarr-ci
+          IMG2OMEZARR_S3_BENCH_PREFIX: benchmark-${{ github.run_id }}
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+        run: cargo bench -p img2omezarr --features "core-bioformats upload-s3" --bench conversion_bench | tee s3-benchmark.csv
+
+      - name: Upload S3 benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-benchmark
+          path: s3-benchmark.csv

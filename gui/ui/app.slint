@@ -10,6 +10,7 @@ import {
 
 export struct QueueFile {
     path: string,
+    output: string,
     status: string,
 }
 
@@ -20,7 +21,7 @@ component FileRow inherits Rectangle {
     callback remove(int);
     callback move-file(int, int);
 
-    height: 34px;
+    height: 58px;
     width: 100%;
     border-width: 1px;
     border-color: #d0d5dd;
@@ -30,11 +31,19 @@ component FileRow inherits Rectangle {
         padding-left: 10px;
         padding-right: 6px;
         spacing: 8px;
-        Text {
-            text: file.path;
-            vertical-alignment: center;
-            color: #101828;
-            overflow: elide;
+        VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: file.path;
+                color: #101828;
+                overflow: elide;
+            }
+            Text {
+                text: file.output;
+                font-size: 12px;
+                color: #667085;
+                overflow: elide;
+            }
         }
         Text {
             text: file.status;
@@ -92,10 +101,14 @@ export component AppWindow inherits Window {
     in-out property <string> s3-endpoint: "";
     in-out property <string> s3-access-key-id: "";
     in-out property <string> s3-secret-access-key: "";
+    in-out property <bool> s3-has-saved-credentials: false;
+    in-out property <bool> s3-clear-credentials: false;
     in-out property <bool> running: false;
     in-out property <float> progress: -1;
     in-out property <string> progress-label: "";
     in-out property <string> log-text: "";
+    in-out property <bool> error-visible: false;
+    in-out property <string> error-message: "";
 
     callback add-files();
     callback files-dropped(data-transfer);
@@ -108,6 +121,9 @@ export component AppWindow inherits Window {
     callback save-s3-profile();
     callback delete-s3-profile();
     callback test-s3-profile();
+    callback target-settings-changed();
+    callback cancel-upload();
+    callback dismiss-error();
 
     background: #f6f7f9;
 
@@ -193,6 +209,11 @@ export component AppWindow inherits Window {
                         enabled: !root.running;
                         clicked => { root.start-upload(); }
                     }
+                    Button {
+                        text: "Cancel";
+                        enabled: root.running;
+                        clicked => { root.cancel-upload(); }
+                    }
                 }
             }
         }
@@ -265,7 +286,10 @@ export component AppWindow inherits Window {
                     ComboBox {
                         model: ["local", "s3"];
                         current-value: root.upload-mode;
-                        selected(value) => { root.upload-mode = value; }
+                        selected(value) => {
+                            root.upload-mode = value;
+                            root.target-settings-changed();
+                        }
                     }
                     Text { text: "S3 Profile"; color: #344054; visible: root.upload-mode == "s3"; }
                     ComboBox {
@@ -311,12 +335,14 @@ export component AppWindow inherits Window {
                         text <=> root.s3-bucket;
                         visible: root.upload-mode == "s3";
                         placeholder-text: "bucket";
+                        edited(_) => { root.target-settings-changed(); }
                     }
                     Text { text: "S3 Prefix"; color: #344054; visible: root.upload-mode == "s3"; }
                     LineEdit {
                         text <=> root.s3-prefix;
                         visible: root.upload-mode == "s3";
                         placeholder-text: "path";
+                        edited(_) => { root.target-settings-changed(); }
                     }
                     Text { text: "S3 Region"; color: #344054; visible: root.upload-mode == "s3"; }
                     LineEdit {
@@ -343,12 +369,59 @@ export component AppWindow inherits Window {
                         visible: root.upload-mode == "s3";
                         placeholder-text: "secret key";
                     }
+                    Text {
+                        text: root.s3-has-saved-credentials ? "Credentials saved" : "No saved credentials";
+                        color: root.s3-has-saved-credentials ? #027a48 : #667085;
+                        visible: root.upload-mode == "s3";
+                    }
+                    CheckBox {
+                        text: "Clear saved credentials on save";
+                        checked: root.s3-clear-credentials;
+                        visible: root.upload-mode == "s3";
+                        toggled => { root.s3-clear-credentials = self.checked; }
+                    }
                     Rectangle { height: 1px; background: transparent; }
                     Text {
                         text: root.log-text;
                         color: #475467;
                         wrap: word-wrap;
                     }
+                }
+            }
+        }
+    }
+
+    if root.error-visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #10182880;
+
+        Rectangle {
+            width: min(520px, parent.width - 48px);
+            height: 180px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #d0d5dd;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                Text {
+                    text: "Error";
+                    font-size: 18px;
+                    color: #101828;
+                }
+                Text {
+                    text: root.error-message;
+                    color: #344054;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+                Button {
+                    text: "OK";
+                    clicked => { root.dismiss-error(); }
                 }
             }
         }
