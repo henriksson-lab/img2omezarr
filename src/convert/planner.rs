@@ -75,6 +75,12 @@ pub fn plan_resolutions(
         .collect()
 }
 
+/// Most voxels a generated volume pyramid leaves in its coarsest level. A
+/// viewer draws its fitted 3D overview from that whole level: newvolim packs it
+/// into 4 GPU pages of 1 Mi voxels, chunk by chunk, so half that leaves room for
+/// partly filled pages.
+pub const MAX_COARSEST_VOLUME_VOXELS: usize = 1 << 21;
+
 pub fn plan_volume_resolutions(
     size_x: usize,
     size_y: usize,
@@ -122,7 +128,14 @@ pub fn plan_volume_resolutions(
                 && base
                     .iter()
                     .zip(scales)
-                    .all(|(&size, scale)| (size / scale).max(1) <= target))
+                    .all(|(&size, scale)| (size / scale).max(1) <= target)
+                && levels.last().is_some_and(|level| {
+                    level.size_x * level.size_y * level.size_z <= MAX_COARSEST_VOLUME_VOXELS
+                }))
+            || base
+                .iter()
+                .zip(scales)
+                .all(|(&size, scale)| size / scale <= 1)
         {
             break;
         }
@@ -239,5 +252,38 @@ mod tests {
                 ([4, 16, 16], [187, 28, 30]),
             ]
         );
+    }
+
+    #[test]
+    fn coarsest_volume_level_fits_a_viewer_overview() {
+        // every axis is within 256 at 4×, but 156×206×202 is 6.5 M voxels
+        let levels = plan_volume_resolutions(
+            811,
+            824,
+            625,
+            [2.0, 2.0, 2.0],
+            ResolutionPolicy::TargetMinSize(256),
+            1,
+        );
+        let sizes: Vec<_> = levels
+            .iter()
+            .map(|level| [level.size_z, level.size_y, level.size_x])
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![
+                [625, 824, 811],
+                [312, 412, 405],
+                [156, 206, 202],
+                [78, 103, 101],
+            ]
+        );
+        let coarsest = levels.last().unwrap();
+        assert!(coarsest.size_x * coarsest.size_y * coarsest.size_z <= MAX_COARSEST_VOLUME_VOXELS);
+
+        // a volume with nothing left to halve still ends
+        let line =
+            plan_volume_resolutions(1, 1, 1, [1.0; 3], ResolutionPolicy::TargetMinSize(0), 1);
+        assert_eq!(line.len(), 1);
     }
 }
