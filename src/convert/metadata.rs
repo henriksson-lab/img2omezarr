@@ -175,6 +175,7 @@ pub fn series_attributes(
     levels: &[ResolutionLevel],
 ) -> Value {
     let image = ome.and_then(|ome| ome.images.get(series_index));
+    let calibrated = spatial_sizes_calibrated(image);
     let axes_json: Vec<Value> = axes
         .iter()
         .map(|axis| {
@@ -186,7 +187,7 @@ pub fn series_attributes(
                     AxisKind::Space => "space",
                 },
             });
-            if matches!(axis.name.kind(), AxisKind::Space) {
+            if calibrated && matches!(axis.name.kind(), AxisKind::Space) {
                 value["unit"] = json!("micrometer");
             }
             value
@@ -201,7 +202,7 @@ pub fn series_attributes(
                 .map(|axis| match axis.name.as_str() {
                     "x" => physical_size(image, meta, PhysicalAxis::X) * f64::from(level.scale_x),
                     "y" => physical_size(image, meta, PhysicalAxis::Y) * f64::from(level.scale_y),
-                    "z" => physical_size(image, meta, PhysicalAxis::Z),
+                    "z" => physical_size(image, meta, PhysicalAxis::Z) * f64::from(level.scale_z),
                     _ => 1.0,
                 })
                 .collect::<Vec<_>>();
@@ -259,6 +260,32 @@ enum PhysicalAxis {
     Z,
 }
 
+/// Whether the spatial sizes are lengths. bioformats reports them in
+/// micrometres, except for an uncalibrated axis, which keeps a non-length unit
+/// such as `pixel` (e.g. an ImageJ `unit=pixel` stack). NGFF has no such unit,
+/// and one uncalibrated axis makes the others relative too (Bio-Formats labels
+/// ImageJ's z spacing µm whatever its unit), so all are then written unitless.
+#[cfg(feature = "core-bioformats")]
+fn spatial_sizes_calibrated(image: Option<&bioformats_rs::OmeImage>) -> bool {
+    image.is_none_or(|image| {
+        image.physical_size_x_unit.is_none()
+            && image.physical_size_y_unit.is_none()
+            && image.physical_size_z_unit.is_none()
+    })
+}
+
+#[cfg(feature = "core-bioformats")]
+pub(crate) fn physical_sizes_xyz(
+    image: Option<&bioformats_rs::OmeImage>,
+    meta: &ImageMetadata,
+) -> [f64; 3] {
+    [
+        physical_size(image, meta, PhysicalAxis::X),
+        physical_size(image, meta, PhysicalAxis::Y),
+        physical_size(image, meta, PhysicalAxis::Z),
+    ]
+}
+
 #[cfg(feature = "core-bioformats")]
 fn physical_size(
     image: Option<&bioformats_rs::OmeImage>,
@@ -314,10 +341,36 @@ fn metadata_value_as_f64(value: &MetadataValue) -> Option<f64> {
 }
 
 #[cfg(feature = "core-bioformats")]
+fn display_range(meta: &ImageMetadata) -> (f64, f64) {
+    let storage_range = pixel_range(meta.pixel_type).unwrap_or((0.0, 1.0));
+    let bits = u32::from(meta.bits_per_pixel);
+    let storage_bits = u32::try_from(meta.pixel_type.bytes_per_sample() * 8).unwrap_or(u32::MAX);
+    if bits == 0 || bits >= storage_bits || bits > 32 {
+        return storage_range;
+    }
+    match meta.pixel_type {
+        bioformats_rs::PixelType::Bit
+        | bioformats_rs::PixelType::Uint8
+        | bioformats_rs::PixelType::Uint16
+        | bioformats_rs::PixelType::Uint32 => (0.0, ((1_u64 << bits) - 1) as f64),
+        bioformats_rs::PixelType::Int8
+        | bioformats_rs::PixelType::Int16
+        | bioformats_rs::PixelType::Int32 => {
+            let magnitude = 1_i64 << (bits - 1);
+            (-magnitude as f64, (magnitude - 1) as f64)
+        }
+        bioformats_rs::PixelType::Float32 | bioformats_rs::PixelType::Float64 => storage_range,
+    }
+}
+
+#[cfg(feature = "core-bioformats")]
 fn omero_metadata(series_index: usize, meta: &ImageMetadata, ome: Option<&OmeMetadata>) -> Value {
     let channel_count = meta.size_c.max(1) as usize;
     let color_render = channel_count > 1 && channel_count < 8;
-    let default_range = pixel_range(meta.pixel_type).unwrap_or((0.0, 1.0));
+    // Camera data is commonly stored in uint16 containers with only 10, 12, or 14 meaningful
+    // bits. Bio-Formats exposes that distinction as bits_per_pixel; using the container maximum
+    // makes the initial image nearly black and gives contrast sliders a mostly useless range.
+    let default_range = display_range(meta);
     let image = ome.and_then(|ome| ome.images.get(series_index));
     let channels = (0..channel_count)
         .map(|c| {
@@ -431,6 +484,69 @@ mod tests {
         let attrs = root_attributes(NgffVersion::V05);
         assert_eq!(attrs["ome"]["version"], "0.5");
         assert_eq!(attrs["ome"]["bioformats2raw.layout"], 3);
+    }
+
+    #[cfg(feature = "core-bioformats")]
+    #[test]
+    fn uncalibrated_sizes_are_written_without_a_unit() {
+        use crate::convert::axes::AxisName;
+        use crate::convert::planner::{ResolutionLevel, ResolutionSource};
+
+        let axes: Vec<Axis> = [AxisName::Z, AxisName::Y, AxisName::X]
+            .into_iter()
+            .map(|name| Axis { name, length: 4, chunk: 4 })
+            .collect();
+        let levels = [ResolutionLevel {
+            index: 0,
+            scale_z: 1,
+            scale_x: 1,
+            scale_y: 1,
+            size_z: 4,
+            size_x: 4,
+            size_y: 4,
+            source: ResolutionSource::Generated,
+        }];
+        let meta = ImageMetadata::default();
+        // an ImageJ `unit=pixel` stack, as bioformats reports it
+        let mut image = bioformats_rs::OmeImage {
+            physical_size_x: Some(2.0),
+            physical_size_y: Some(2.0),
+            physical_size_z: Some(2.0),
+            physical_size_x_unit: Some("pixel".into()),
+            physical_size_y_unit: Some("pixel".into()),
+            ..Default::default()
+        };
+        let attrs = |image: &bioformats_rs::OmeImage| {
+            let ome = OmeMetadata { images: vec![image.clone()], ..Default::default() };
+            series_attributes(&ConversionSettings::default(), 0, &meta, Some(&ome), &axes, &levels)
+        };
+
+        let uncalibrated = attrs(&image);
+        let multiscale = &uncalibrated["ome"]["multiscales"][0];
+        for axis in multiscale["axes"].as_array().unwrap() {
+            assert!(axis.get("unit").is_none(), "{axis}");
+        }
+        assert_eq!(multiscale["datasets"][0]["coordinateTransformations"][0]["scale"], json!([2.0, 2.0, 2.0]));
+
+        image.physical_size_x_unit = None;
+        image.physical_size_y_unit = None;
+        let calibrated = attrs(&image);
+        assert_eq!(calibrated["ome"]["multiscales"][0]["axes"][2]["unit"], "micrometer");
+    }
+
+    #[cfg(feature = "core-bioformats")]
+    #[test]
+    fn omero_window_uses_declared_significant_bits() {
+        let meta = ImageMetadata {
+            pixel_type: bioformats_rs::PixelType::Uint16,
+            bits_per_pixel: 12,
+            size_c: 2,
+            ..Default::default()
+        };
+        let omero = omero_metadata(0, &meta, None);
+        assert_eq!(omero["channels"][0]["window"]["start"], 0.0);
+        assert_eq!(omero["channels"][0]["window"]["end"], 4095.0);
+        assert_eq!(omero["channels"][1]["window"]["max"], 4095.0);
     }
 
     #[cfg(feature = "core-bioformats")]

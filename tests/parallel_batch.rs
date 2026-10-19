@@ -46,6 +46,6 @@ fn batch_jobs_can_run_with_multiple_workers_and_keep_report_order() {
     assert_eq!(reports.len(), 2);
     assert_eq!(reports[0].output, output_a);
     assert_eq!(reports[1].output, output_b);
-    assert!(reports[0].output.join("0/0/zarr.json").exists());
-    assert!(reports[1].output.join("0/0/zarr.json").exists());
+    assert!(reports[0].output.join("0/zarr.json").exists());
+    assert!(reports[1].output.join("0/zarr.json").exists());
 }

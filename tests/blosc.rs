@@ -38,7 +38,7 @@ fn ngff_05_writes_blosc_codec_metadata_and_readable_pixels() {
     .expect("convert NGFF 0.5 with blosc");
 
     let array_meta: serde_json::Value =
-        serde_json::from_slice(&fs::read(output.join("0/0/zarr.json")).expect("read array meta"))
+        serde_json::from_slice(&fs::read(output.join("0/zarr.json")).expect("read array meta"))
             .expect("parse array meta");
     let codec = array_meta["codecs"]
         .as_array()
@@ -50,7 +50,7 @@ fn ngff_05_writes_blosc_codec_metadata_and_readable_pixels() {
     assert_eq!(codec["configuration"]["clevel"], 5);
 
     let store = Arc::new(FilesystemStore::new(&output).expect("open store"));
-    let array = ZarrArray::open(store, "/0/0").expect("open v3 blosc array");
+    let array = ZarrArray::open(store, "/0").expect("open v3 blosc array");
     let subset =
         ArraySubset::new_with_start_shape(vec![0; 5], vec![1, 1, 1, 4, 4]).expect("subset");
     let pixels = array

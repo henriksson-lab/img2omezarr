@@ -41,27 +41,22 @@ fn ngff_04_writes_zarr_v2_metadata_and_readable_pixels() {
 
     assert!(output.join(".zgroup").exists());
     assert!(output.join(".zattrs").exists());
-    assert!(output.join("0/.zgroup").exists());
-    assert!(output.join("0/.zattrs").exists());
-    assert!(output.join("0/0/.zarray").exists());
+    assert!(output.join("0/.zarray").exists());
     assert!(!output.join("zarr.json").exists());
 
     let root_attrs = read_json(&output.join(".zattrs"));
-    assert_eq!(root_attrs["bioformats2raw.layout"], 3);
-    assert!(root_attrs.get("ome").is_none());
+    assert!(root_attrs.get("bioformats2raw.layout").is_none());
+    assert_eq!(root_attrs["multiscales"][0]["version"], "0.4");
+    assert_eq!(root_attrs["multiscales"][0]["datasets"][0]["path"], "0");
 
-    let image_attrs = read_json(&output.join("0/.zattrs"));
-    assert_eq!(image_attrs["multiscales"][0]["version"], "0.4");
-    assert_eq!(image_attrs["multiscales"][0]["datasets"][0]["path"], "0");
-
-    let array_meta = read_json(&output.join("0/0/.zarray"));
+    let array_meta = read_json(&output.join("0/.zarray"));
     assert_eq!(array_meta["zarr_format"], 2);
     assert_eq!(array_meta["shape"], serde_json::json!([1, 1, 1, 4, 4]));
     assert_eq!(array_meta["dimension_separator"], "/");
     assert!(array_meta["compressor"].is_null());
 
     let store = Arc::new(FilesystemStore::new(&output).expect("open store"));
-    let array = ZarrArray::open(store, "/0/0").expect("open v2 array");
+    let array = ZarrArray::open(store, "/0").expect("open v2 array");
     let subset =
         ArraySubset::new_with_start_shape(vec![0; 5], vec![1, 1, 1, 4, 4]).expect("subset");
     let pixels = array
@@ -123,13 +118,13 @@ fn ngff_04_writes_blosc_compressor_metadata_and_readable_pixels() {
     )
     .expect("convert NGFF 0.4 with blosc");
 
-    let array_meta = read_json(&output.join("0/0/.zarray"));
+    let array_meta = read_json(&output.join("0/.zarray"));
     assert_eq!(array_meta["compressor"]["id"], "blosc");
     assert_eq!(array_meta["compressor"]["cname"], "zstd");
     assert_eq!(array_meta["compressor"]["clevel"], 5);
 
     let store = Arc::new(FilesystemStore::new(&output).expect("open store"));
-    let array = ZarrArray::open(store, "/0/0").expect("open v2 blosc array");
+    let array = ZarrArray::open(store, "/0").expect("open v2 blosc array");
     let subset =
         ArraySubset::new_with_start_shape(vec![0; 5], vec![1, 1, 1, 4, 4]).expect("subset");
     let pixels = array

@@ -289,15 +289,15 @@ fn default_ngff_version() -> String {
 }
 
 fn default_tile_width() -> i32 {
-    1024
+    64
 }
 
 fn default_tile_height() -> i32 {
-    1024
+    64
 }
 
 fn default_chunk_depth() -> i32 {
-    1
+    32
 }
 
 fn default_target_min_size() -> i32 {
@@ -305,7 +305,7 @@ fn default_target_min_size() -> i32 {
 }
 
 fn default_downsampling() -> String {
-    "nearest".to_string()
+    "average".to_string()
 }
 
 fn default_compression() -> String {

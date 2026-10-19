@@ -98,7 +98,6 @@ fn cli_uploads_readable_omezarr_to_s3_compatible_store() {
     for key in [
         format!("{dataset_prefix}/zarr.json"),
         format!("{dataset_prefix}/0/zarr.json"),
-        format!("{dataset_prefix}/0/0/zarr.json"),
     ] {
         runtime
             .block_on(store.head(&ObjectPath::from(key.clone())))
@@ -106,7 +105,7 @@ fn cli_uploads_readable_omezarr_to_s3_compatible_store() {
     }
 
     let image_group = runtime
-        .block_on(store.get(&ObjectPath::from(format!("{dataset_prefix}/0/zarr.json"))))
+        .block_on(store.get(&ObjectPath::from(format!("{dataset_prefix}/zarr.json"))))
         .expect("get image group metadata");
     let bytes = runtime
         .block_on(image_group.bytes())
@@ -190,7 +189,7 @@ fn download_prefix(store: &AmazonS3, runtime: &tokio::runtime::Runtime, prefix: 
 
 fn read_level0_pixels(root: &Path) -> Vec<u8> {
     let store = Arc::new(FilesystemStore::new(root).expect("open zarr store"));
-    let array = ZarrArray::open(store, "/0/0").expect("open zarr array");
+    let array = ZarrArray::open(store, "/0").expect("open zarr array");
     let subset =
         ArraySubset::new_with_start_shape(vec![0; 5], vec![1, 1, 1, 4, 4]).expect("subset");
     array

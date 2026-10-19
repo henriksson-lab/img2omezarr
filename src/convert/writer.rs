@@ -19,14 +19,15 @@ use crate::convert::axes::{chunks, shape, tczyx_axes};
 use crate::convert::config::{
     CompressionCodec, ConversionSettings, Downsampling, NgffVersion, ResolutionPolicy,
 };
-use crate::convert::downsample::downsample_bytes;
+use crate::convert::downsample::{downsample_bytes, reduce_depth_bytes};
 use crate::convert::dtype::{bytes_per_sample, zarr_data_type, zarr_v2_data_type};
 use crate::convert::metadata::{
     hcs_image_paths, ome_group_attributes, root_attributes, root_attributes_with_hcs_plate,
     series_attributes, well_attributes, HcsImagePath,
 };
 use crate::convert::planner::{
-    plan_resolutions, selected_series, source_resolution_level, ResolutionLevel, ResolutionSource,
+    plan_volume_resolutions, selected_series, source_resolution_level, ResolutionLevel,
+    ResolutionSource,
 };
 use crate::convert::progress::ProgressSink;
 use crate::convert::reader::{plane_index, BioformatsImageSource};
@@ -51,29 +52,41 @@ where
         .as_ref()
         .map(|ome| hcs_image_paths(ome, &selected))
         .unwrap_or_default();
-    let root_attrs = if hcs_paths.is_empty() {
-        root_attributes(settings.ngff_version)
-    } else {
-        root_attributes_with_hcs_plate(
+    let direct_image = selected.len() == 1 && hcs_paths.is_empty();
+    if direct_image {
+        // `write_series` publishes the image metadata at `/`. Keep the OME-XML
+        // sidecar directory a valid Zarr group, but do not pretend that this one
+        // image is a transitional BioFormats2Raw collection.
+        write_group(
+            &store,
+            "/OME",
+            serde_json::json!({"ome": {"version": settings.ngff_version.as_str()}}),
             settings.ngff_version,
-            collection_ome
-                .as_ref()
-                .expect("HCS paths require OME metadata"),
-            &hcs_paths,
-        )
-    };
-    write_group(&store, "/", root_attrs, settings.ngff_version)?;
-
-    let series_paths = selected
-        .iter()
-        .map(|series| image_path_for_series(*series, &hcs_paths))
-        .collect::<Vec<_>>();
-    write_group(
-        &store,
-        "/OME",
-        ome_group_attributes(settings.ngff_version, &series_paths),
-        settings.ngff_version,
-    )?;
+        )?;
+    } else {
+        let root_attrs = if hcs_paths.is_empty() {
+            root_attributes(settings.ngff_version)
+        } else {
+            root_attributes_with_hcs_plate(
+                settings.ngff_version,
+                collection_ome
+                    .as_ref()
+                    .expect("HCS paths require OME metadata"),
+                &hcs_paths,
+            )
+        };
+        write_group(&store, "/", root_attrs, settings.ngff_version)?;
+        let series_paths = selected
+            .iter()
+            .map(|series| image_path_for_series(*series, &hcs_paths))
+            .collect::<Vec<_>>();
+        write_group(
+            &store,
+            "/OME",
+            ome_group_attributes(settings.ngff_version, &series_paths),
+            settings.ngff_version,
+        )?;
+    }
 
     let mut written = Vec::with_capacity(selected.len());
     let mut wrote_ome_xml = false;
@@ -88,14 +101,19 @@ where
                 wrote_ome_xml = true;
             }
         }
-        let levels = resolution_levels(source, &meta, settings)?;
+        let levels = resolution_levels(source, &meta, ome.as_ref(), series, settings)?;
+        let image_path = if direct_image {
+            String::new()
+        } else {
+            image_path_for_series(series, &hcs_paths)
+        };
         write_series(
             source,
             output,
             &store,
             settings,
             series,
-            &image_path_for_series(series, &hcs_paths),
+            &image_path,
             &hcs_paths,
             &meta,
             ome.as_ref(),
@@ -127,6 +145,8 @@ fn image_path_for_series(series: usize, hcs_paths: &[HcsImagePath]) -> String {
 fn resolution_levels(
     source: &mut BioformatsImageSource,
     base_meta: &ImageMetadata,
+    ome: Option<&bioformats_rs::OmeMetadata>,
+    series: usize,
     settings: &ConversionSettings,
 ) -> anyhow::Result<Vec<ResolutionLevel>> {
     let resolution_count = source.resolution_count();
@@ -139,22 +159,27 @@ fn resolution_levels(
         for source_resolution in 0..resolution_count {
             source.set_resolution(source_resolution)?;
             let level_meta = source.metadata();
-            levels.push(source_resolution_level(
+            let mut level = source_resolution_level(
                 source_resolution,
                 source_resolution,
                 base_meta.size_x as usize,
                 base_meta.size_y as usize,
                 level_meta.size_x as usize,
                 level_meta.size_y as usize,
-            ));
+            );
+            level.size_z = base_meta.size_z.max(1) as usize;
+            levels.push(level);
         }
         source.set_resolution(0)?;
         return Ok(levels);
     }
 
-    Ok(plan_resolutions(
+    let image = ome.and_then(|ome| ome.images.get(series));
+    Ok(plan_volume_resolutions(
         base_meta.size_x as usize,
         base_meta.size_y as usize,
+        base_meta.size_z.max(1) as usize,
+        crate::convert::metadata::physical_sizes_xyz(image, base_meta),
         settings.resolution_policy,
         resolution_count,
     ))
@@ -212,7 +237,9 @@ where
     let base_axes = tczyx_axes(
         meta.size_t as usize,
         meta.size_c as usize,
-        meta.size_z as usize,
+        levels
+            .first()
+            .map_or(meta.size_z.max(1) as usize, |level| level.size_z),
         meta.size_y as usize,
         meta.size_x as usize,
         settings.tile_height,
@@ -221,26 +248,30 @@ where
     );
     let attrs = series_attributes(settings, series, meta, ome, &base_axes, levels);
     write_parent_hcs_groups(store, settings.ngff_version, image_path, hcs_paths)?;
-    write_group(
-        store,
-        &format!("/{image_path}"),
-        attrs,
-        settings.ngff_version,
-    )?;
+    let image_node = if image_path.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{image_path}")
+    };
+    write_group(store, &image_node, attrs, settings.ngff_version)?;
 
     let mut done = 0usize;
     for level in levels {
         let axes = tczyx_axes(
             meta.size_t as usize,
             meta.size_c as usize,
-            meta.size_z as usize,
+            level.size_z,
             level.size_y,
             level.size_x,
             settings.tile_height,
             settings.tile_width,
             settings.chunk_depth,
         );
-        let node = format!("/{image_path}/{}", level.index);
+        let node = if image_path.is_empty() {
+            format!("/{}", level.index)
+        } else {
+            format!("/{image_path}/{}", level.index)
+        };
         create_array(
             store,
             &node,
@@ -287,7 +318,7 @@ where
         ResolutionSource::Source(source_resolution) => source.set_resolution(source_resolution)?,
     }
 
-    let size_z = meta.size_z.max(1) as usize;
+    let size_z = level.size_z;
     let size_c = meta.size_c.max(1) as usize;
     let size_t = meta.size_t.max(1) as usize;
     let bps = bytes_per_sample(meta.pixel_type);
@@ -352,40 +383,53 @@ fn read_chunk_bytes(
     t: usize,
     bps: usize,
 ) -> anyhow::Result<Vec<u8>> {
-    let scale = level.scale_x.max(1) as usize;
+    let scale_xy = level.scale_x.max(1) as usize;
+    let scale_z = level.scale_z.max(1) as usize;
     let mut out = Vec::with_capacity(width * height * depth * bps);
     for dz in 0..depth {
-        let z = z0 + dz;
-        let plane = plane_index(
-            meta.dimension_order,
-            z as u32,
-            c as u32,
-            t as u32,
-            meta.size_z.max(1),
-            meta.size_c.max(1),
-            meta.size_t.max(1),
-        );
-        if matches!(level.source, ResolutionSource::Source(_)) || level.index == 0 {
-            let plane_bytes =
-                source.open_region(plane, x as u32, y as u32, width as u32, height as u32)?;
-            out.extend_from_slice(&plane_bytes);
-        } else {
-            let sx = x * scale;
-            let sy = y * scale;
-            let sw = (width * scale).min(meta.size_x as usize - sx);
-            let sh = (height * scale).min(meta.size_y as usize - sy);
-            let plane_bytes =
-                source.open_region(plane, sx as u32, sy as u32, sw as u32, sh as u32)?;
-            out.extend(downsample_bytes(
-                &plane_bytes,
-                sw,
-                sh,
-                meta.pixel_type,
-                meta.is_little_endian,
-                scale,
-                downsampling,
-            ));
+        let source_z0 = (z0 + dz) * scale_z;
+        let source_depth = scale_z.min(meta.size_z.max(1) as usize - source_z0);
+        let mut planes = Vec::with_capacity(width * height * source_depth * bps);
+        for source_z in source_z0..source_z0 + source_depth {
+            let plane = plane_index(
+                meta.dimension_order,
+                source_z as u32,
+                c as u32,
+                t as u32,
+                meta.size_z.max(1),
+                meta.size_c.max(1),
+                meta.size_t.max(1),
+            );
+            if matches!(level.source, ResolutionSource::Source(_)) || level.index == 0 {
+                let plane_bytes =
+                    source.open_region(plane, x as u32, y as u32, width as u32, height as u32)?;
+                planes.extend_from_slice(&plane_bytes);
+            } else {
+                let sx = x * scale_xy;
+                let sy = y * scale_xy;
+                let sw = (width * scale_xy).min(meta.size_x as usize - sx);
+                let sh = (height * scale_xy).min(meta.size_y as usize - sy);
+                let plane_bytes =
+                    source.open_region(plane, sx as u32, sy as u32, sw as u32, sh as u32)?;
+                planes.extend(downsample_bytes(
+                    &plane_bytes,
+                    sw,
+                    sh,
+                    meta.pixel_type,
+                    meta.is_little_endian,
+                    scale_xy,
+                    downsampling,
+                ));
+            }
         }
+        out.extend(reduce_depth_bytes(
+            &planes,
+            width * height,
+            source_depth,
+            meta.pixel_type,
+            meta.is_little_endian,
+            downsampling,
+        ));
     }
     Ok(out)
 }
@@ -713,7 +757,7 @@ fn chunk_count(
     level: &ResolutionLevel,
     settings: &ConversionSettings,
 ) -> usize {
-    let z_chunks = div_ceil(meta.size_z.max(1) as usize, settings.chunk_depth.max(1));
+    let z_chunks = div_ceil(level.size_z, settings.chunk_depth.max(1));
     let y_chunks = div_ceil(level.size_y, settings.tile_height.max(1));
     let x_chunks = div_ceil(level.size_x, settings.tile_width.max(1));
     meta.size_t.max(1) as usize * meta.size_c.max(1) as usize * z_chunks * y_chunks * x_chunks

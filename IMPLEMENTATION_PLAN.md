@@ -393,6 +393,43 @@ The OME-Zarr 0.5 writer currently:
 - runs independent batch conversion jobs through a bounded worker pool while
   preserving report order.
 
+### Output hierarchy policy and known defect
+
+`bioformats2raw.layout` is transitional OME-NGFF metadata for a collection of
+ordered image series. It exists so readers can recognize the wrapping hierarchy
+used by BioFormats2Raw and associate its numbered image groups with the
+collection-level OME-XML metadata. It is not the general representation for one
+ordinary image.
+
+The writer previously emitted `bioformats2raw.layout = 3`, an
+`OME/series` registry, and a numbered image group for every conversion,
+including a non-HCS input from which only one series is selected. This is a
+format-policy defect. The resulting store is valid as a transitional image
+collection, but it unnecessarily makes the dataset root differ from the image
+root. Downstream code can consequently read image `0` while mistakenly writing
+labels or object tables beside it at the collection root. OME-NGFF label groups
+belong beneath the image group they describe.
+
+The required output policy is:
+
+- A non-HCS conversion selecting exactly one image series writes that
+  multiscale image directly at the output root. It does not write
+  `bioformats2raw.layout` or introduce an `OME/series` indirection.
+- A conversion containing multiple image series may use the transitional
+  collection layout. Its root declares `bioformats2raw.layout = 3`, and its
+  `OME/series` metadata lists the image groups in stable source-series order.
+- HCS input uses the OME-NGFF plate, well, field, and image hierarchy. Plate
+  metadata takes precedence over transitional collection discovery.
+- Labels, feature tables, and other image-derived data are attached relative
+  to the resolved image group, regardless of the surrounding hierarchy.
+
+Existing single-series stores written with the collection wrapper remain
+readable and must not be silently reinterpreted as direct-root images. They can
+be migrated explicitly, or consumers can continue resolving `OME/series` and
+attach derived data beneath the resolved image group. New output follows the
+policy above. The direct-root path is covered by the release conversion tests,
+while the existing HCS test continues to cover the hierarchical path.
+
 Verified commands:
 
 ```text

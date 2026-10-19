@@ -63,11 +63,11 @@ struct SettingsArgs {
     ngff_version: NgffArg,
     #[arg(long, default_value = "all")]
     series: String,
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = 64)]
     tile_width: usize,
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = 64)]
     tile_height: usize,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 32)]
     chunk_depth: usize,
     #[arg(long)]
     resolutions: Option<usize>,
@@ -77,7 +77,7 @@ struct SettingsArgs {
     target_min_size: u32,
     #[arg(long, default_value = "zstd")]
     compression: CompressionArg,
-    #[arg(long, default_value = "nearest")]
+    #[arg(long, default_value = "average")]
     downsampling: DownsamplingArg,
     #[arg(long, default_value_t = 3)]
     compression_level: i32,

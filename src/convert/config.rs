@@ -87,7 +87,7 @@ pub enum Downsampling {
 
 impl Default for Downsampling {
     fn default() -> Self {
-        Self::Nearest
+        Self::Average
     }
 }
 
@@ -134,11 +134,11 @@ impl Default for ConversionSettings {
         Self {
             ngff_version: NgffVersion::V05,
             series: SeriesSelection::All,
-            tile_width: 1024,
-            tile_height: 1024,
-            chunk_depth: 1,
+            tile_width: 64,
+            tile_height: 64,
+            chunk_depth: 32,
             resolution_policy: ResolutionPolicy::TargetMinSize(256),
-            downsampling: Downsampling::Nearest,
+            downsampling: Downsampling::Average,
             compression: CompressionSettings::default(),
             overwrite: false,
             write_omero_metadata: true,

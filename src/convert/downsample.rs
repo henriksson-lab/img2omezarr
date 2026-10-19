@@ -45,6 +45,128 @@ pub fn downsample_bytes(
 }
 
 #[cfg(feature = "core-bioformats")]
+pub fn reduce_depth_bytes(
+    input: &[u8],
+    plane_pixels: usize,
+    planes: usize,
+    pixel_type: PixelType,
+    little_endian: bool,
+    method: Downsampling,
+) -> Vec<u8> {
+    if planes <= 1 {
+        return input.to_vec();
+    }
+    let bytes_per_sample = pixel_type.bytes_per_sample();
+    if method == Downsampling::Nearest {
+        return input[..plane_pixels * bytes_per_sample].to_vec();
+    }
+    match pixel_type {
+        PixelType::Bit | PixelType::Uint8 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| bytes[0] as f64,
+            |value| vec![value.round().clamp(0.0, u8::MAX as f64) as u8],
+        ),
+        PixelType::Int8 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| bytes[0] as i8 as f64,
+            |value| vec![(value.round().clamp(i8::MIN as f64, i8::MAX as f64) as i8) as u8],
+        ),
+        PixelType::Int16 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| i16::from_ne_bytes(endian2(bytes, little_endian)) as f64,
+            |value| {
+                encode_i16(
+                    value.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16,
+                    little_endian,
+                )
+            },
+        ),
+        PixelType::Uint16 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| u16::from_ne_bytes(endian2(bytes, little_endian)) as f64,
+            |value| {
+                encode_u16(
+                    value.round().clamp(0.0, u16::MAX as f64) as u16,
+                    little_endian,
+                )
+            },
+        ),
+        PixelType::Int32 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| i32::from_ne_bytes(endian4(bytes, little_endian)) as f64,
+            |value| {
+                encode_i32(
+                    value.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                    little_endian,
+                )
+            },
+        ),
+        PixelType::Uint32 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| u32::from_ne_bytes(endian4(bytes, little_endian)) as f64,
+            |value| {
+                encode_u32(
+                    value.round().clamp(0.0, u32::MAX as f64) as u32,
+                    little_endian,
+                )
+            },
+        ),
+        PixelType::Float32 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| f32::from_ne_bytes(endian4(bytes, little_endian)) as f64,
+            |value| encode_f32(value as f32, little_endian),
+        ),
+        PixelType::Float64 => average_depth_numeric(
+            input,
+            plane_pixels,
+            planes,
+            |bytes| f64::from_ne_bytes(endian8(bytes, little_endian)),
+            |value| encode_f64(value, little_endian),
+        ),
+    }
+}
+
+#[cfg(feature = "core-bioformats")]
+fn average_depth_numeric<F, G>(
+    input: &[u8],
+    plane_pixels: usize,
+    planes: usize,
+    decode: F,
+    encode: G,
+) -> Vec<u8>
+where
+    F: Fn(&[u8]) -> f64,
+    G: Fn(f64) -> Vec<u8>,
+{
+    let bytes_per_sample = input.len() / (plane_pixels * planes).max(1);
+    let mut out = Vec::with_capacity(plane_pixels * bytes_per_sample);
+    for pixel in 0..plane_pixels {
+        let sum = (0..planes)
+            .map(|plane| {
+                let offset = (plane * plane_pixels + pixel) * bytes_per_sample;
+                decode(&input[offset..offset + bytes_per_sample])
+            })
+            .sum::<f64>();
+        out.extend(encode(sum / planes as f64));
+    }
+    out
+}
+
+#[cfg(feature = "core-bioformats")]
 fn downsample_average_bytes(
     input: &[u8],
     width: usize,
@@ -318,6 +440,28 @@ mod tests {
                 Downsampling::Average
             ),
             7u16.to_be_bytes().to_vec()
+        );
+    }
+
+    #[test]
+    fn average_reduces_depth_for_u16_big_endian() {
+        let input = [2u16, 4, 10, 12]
+            .into_iter()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reduce_depth_bytes(
+                &input,
+                2,
+                2,
+                PixelType::Uint16,
+                false,
+                Downsampling::Average
+            ),
+            [6u16, 8]
+                .into_iter()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<_>>()
         );
     }
 }

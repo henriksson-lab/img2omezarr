@@ -3,8 +3,10 @@ use crate::convert::config::{ResolutionPolicy, SeriesSelection};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionLevel {
     pub index: usize,
+    pub scale_z: u32,
     pub scale_x: u32,
     pub scale_y: u32,
+    pub size_z: usize,
     pub size_x: usize,
     pub size_y: usize,
     pub source: ResolutionSource,
@@ -61,14 +63,87 @@ pub fn plan_resolutions(
             let scale = 2usize.pow(index as u32);
             ResolutionLevel {
                 index,
+                scale_z: 1,
                 scale_x: scale as u32,
                 scale_y: scale as u32,
+                size_z: 1,
                 size_x: (size_x / scale).max(1),
                 size_y: (size_y / scale).max(1),
                 source: ResolutionSource::Generated,
             }
         })
         .collect()
+}
+
+pub fn plan_volume_resolutions(
+    size_x: usize,
+    size_y: usize,
+    size_z: usize,
+    physical_size_xyz: [f64; 3],
+    policy: ResolutionPolicy,
+    source_resolution_count: usize,
+) -> Vec<ResolutionLevel> {
+    let explicit_levels = match policy {
+        ResolutionPolicy::ExplicitLevels(n) => Some(n.max(1)),
+        ResolutionPolicy::ExistingOrTargetMinSize(_) if source_resolution_count > 1 => {
+            Some(source_resolution_count)
+        }
+        _ => None,
+    };
+    let target = match policy {
+        ResolutionPolicy::TargetMinSize(min) | ResolutionPolicy::ExistingOrTargetMinSize(min) => {
+            min.max(1) as usize
+        }
+        ResolutionPolicy::ExplicitLevels(_) => 1,
+    };
+    let base = [size_x.max(1), size_y.max(1), size_z.max(1)];
+    let spacing = physical_size_xyz.map(|value| {
+        if value.is_finite() && value > 0.0 {
+            value
+        } else {
+            1.0
+        }
+    });
+    let mut scales = [1usize; 3];
+    let mut levels = Vec::new();
+    loop {
+        levels.push(ResolutionLevel {
+            index: levels.len(),
+            scale_x: scales[0] as u32,
+            scale_y: scales[1] as u32,
+            scale_z: scales[2] as u32,
+            size_x: (base[0] / scales[0]).max(1),
+            size_y: (base[1] / scales[1]).max(1),
+            size_z: (base[2] / scales[2]).max(1),
+            source: ResolutionSource::Generated,
+        });
+        if explicit_levels.is_some_and(|count| levels.len() >= count)
+            || (explicit_levels.is_none()
+                && base
+                    .iter()
+                    .zip(scales)
+                    .all(|(&size, scale)| (size / scale).max(1) <= target))
+        {
+            break;
+        }
+        let effective = std::array::from_fn::<_, 3, _>(|axis| spacing[axis] * scales[axis] as f64);
+        let coarsest = effective.iter().copied().fold(0.0_f64, f64::max);
+        let xy_can_coarsen = (base[0] / scales[0] > 1 || base[1] / scales[1] > 1)
+            && effective[0].max(effective[1]) * 2.0 <= coarsest * 1.05;
+        let z_can_coarsen = base[2] / scales[2] > 1 && effective[2] * 2.0 <= coarsest * 1.05;
+        let any = xy_can_coarsen || z_can_coarsen;
+        if xy_can_coarsen || !any {
+            for axis in 0..2 {
+                if base[axis] / scales[axis] > 1 {
+                    scales[axis] = scales[axis].saturating_mul(2);
+                }
+            }
+        }
+        if base[2] / scales[2] > 1 && (z_can_coarsen || !any) {
+            scales[2] = scales[2].saturating_mul(2);
+        }
+    }
+    levels
 }
 
 pub fn source_resolution_level(
@@ -81,8 +156,10 @@ pub fn source_resolution_level(
 ) -> ResolutionLevel {
     ResolutionLevel {
         index,
+        scale_z: 1,
         scale_x: rounded_scale(base_size_x, size_x),
         scale_y: rounded_scale(base_size_y, size_y),
+        size_z: 1,
         size_x: size_x.max(1),
         size_y: size_y.max(1),
         source: ResolutionSource::Source(source_resolution),
@@ -132,5 +209,35 @@ mod tests {
         assert_eq!(level.source, ResolutionSource::Source(1));
         assert_eq!((level.size_x, level.size_y), (128, 64));
         assert_eq!((level.scale_x, level.scale_y), (4, 4));
+    }
+
+    #[test]
+    fn volume_levels_preserve_anisotropy_then_coarsen_all_axes() {
+        let levels = plan_volume_resolutions(
+            491,
+            459,
+            750,
+            [0.5, 0.5, 2.0],
+            ResolutionPolicy::TargetMinSize(256),
+            1,
+        );
+        assert_eq!(
+            levels
+                .iter()
+                .map(|level| {
+                    (
+                        [level.scale_z, level.scale_y, level.scale_x],
+                        [level.size_z, level.size_y, level.size_x],
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ([1, 1, 1], [750, 459, 491]),
+                ([1, 2, 2], [750, 229, 245]),
+                ([1, 4, 4], [750, 114, 122]),
+                ([2, 8, 8], [375, 57, 61]),
+                ([4, 16, 16], [187, 28, 30]),
+            ]
+        );
     }
 }

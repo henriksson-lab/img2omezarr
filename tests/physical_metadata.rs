@@ -41,7 +41,7 @@ fn physical_sizes_are_written_to_coordinate_transform_scales() {
     .expect("convert physical metadata fixture");
 
     let image_group: serde_json::Value =
-        serde_json::from_slice(&fs::read(output.join("0/zarr.json")).expect("read image group"))
+        serde_json::from_slice(&fs::read(output.join("zarr.json")).expect("read image group"))
             .expect("parse image group");
     let multiscale = &image_group["attributes"]["ome"]["multiscales"][0];
     assert_eq!(

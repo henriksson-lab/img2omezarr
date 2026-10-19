@@ -59,13 +59,13 @@ fn existing_source_resolutions_are_written_without_generated_downsampling() {
     )
     .expect("convert native pyramid");
 
-    let level0 = read_u8_array(&output, "/0/0", [1, 1, 1, 4, 4]);
-    let level1 = read_u8_array(&output, "/0/1", [1, 1, 1, 2, 2]);
+    let level0 = read_u8_array(&output, "/0", [1, 1, 1, 4, 4]);
+    let level1 = read_u8_array(&output, "/1", [1, 1, 1, 2, 2]);
     assert_eq!(level0, full_plane);
     assert_eq!(level1, native_reduced_plane);
 
     let image_group: serde_json::Value =
-        serde_json::from_slice(&fs::read(output.join("0/zarr.json")).expect("read image group"))
+        serde_json::from_slice(&fs::read(output.join("zarr.json")).expect("read image group"))
             .expect("parse image group");
     let datasets = &image_group["attributes"]["ome"]["multiscales"][0]["datasets"];
     assert_eq!(datasets.as_array().expect("datasets").len(), 2);
