@@ -47,26 +47,42 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Start MinIO
+      # Upstream removed its public container images; build pinned source releases.
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.8'
+          cache: false
+
+      - name: Install MinIO
+        env:
+          GOBIN: ${{ runner.temp }}/minio-bin
         run: |
-          docker run -d --name img2omezarr-minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
+          go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+          go install github.com/minio/mc@RELEASE.2025-08-13T08-35-41Z
+          echo "$GOBIN" >> "$GITHUB_PATH"
+
+      - name: Start MinIO
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        run: |
+          nohup minio server "$RUNNER_TEMP/minio-data" --address 127.0.0.1:9000 \
+            > "$RUNNER_TEMP/minio.log" 2>&1 &
           for i in {1..30}; do
             if curl -fsS http://127.0.0.1:9000/minio/health/ready; then
               exit 0
             fi
             sleep 2
           done
-          docker logs img2omezarr-minio
+          cat "$RUNNER_TEMP/minio.log"
           exit 1
 
       - name: Create MinIO bucket
+        env:
+          MC_HOST_local: http://minioadmin:minioadmin@127.0.0.1:9000
         run: |
-          docker run --rm --network host minio/mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
-          docker run --rm --network host minio/mc mb --ignore-existing local/img2omezarr-ci
+          mc mb --ignore-existing local/img2omezarr-ci
 
       - name: Test CLI S3 upload
         env:
