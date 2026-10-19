@@ -25,6 +25,7 @@ ndarray = "0.17"
 num-traits = "0.2"
 object_store = { version = "0.12", features = ["aws"], optional = true }
 rayon = "1"
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"

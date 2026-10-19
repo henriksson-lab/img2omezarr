@@ -25,7 +25,16 @@ The real-world fixture matrix is tracked in [docs/validation.md](docs/validation
 ```sh
 img2omezarr convert INPUT OUTPUT.ome.zarr
 img2omezarr batch --output-dir OUT INPUT...
+img2omezarr set-positions --overlap 120,120 --grid-unit voxel TILE.ome.zarr...
+img2omezarr set-positions --from-originals RAW_DIR TILE.ome.zarr...
 ```
+
+Tiles get their stage position as a level-0 `translation`, from a
+`--positions` table, a grid read from the names, a format's own metadata
+(LaVision UltraMicroscope), or the reader's OME metadata; see
+[docs/tile-positions.md](docs/tile-positions.md). `set-positions` writes them
+into existing OME-Zarr images without touching chunk data, reading the
+original files when given them.
 
 Run `img2omezarr --help` for the full CLI options.
 

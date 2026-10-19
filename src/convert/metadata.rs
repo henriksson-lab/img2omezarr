@@ -10,6 +10,8 @@ use crate::convert::config::NgffVersion;
 use crate::convert::dtype::pixel_range;
 #[cfg(feature = "core-bioformats")]
 use crate::convert::planner::ResolutionLevel;
+#[cfg(feature = "core-bioformats")]
+use crate::convert::positions::Placement;
 
 #[cfg(feature = "core-bioformats")]
 use bioformats_rs::{ImageMetadata, MetadataValue, OmeMetadata};
@@ -21,6 +23,19 @@ pub struct HcsImagePath {
     pub well_path: String,
     pub field_path: String,
     pub image_path: String,
+}
+
+/// Display limits written to `omero.channels[].window`.
+///
+/// `min` and `max` describe the observed data bounds. `start` and `end` are
+/// the initial display window, which may be narrower for useful auto contrast.
+#[cfg(feature = "core-bioformats")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelWindow {
+    pub min: f64,
+    pub max: f64,
+    pub start: f64,
+    pub end: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,8 +188,24 @@ pub fn series_attributes(
     ome: Option<&OmeMetadata>,
     axes: &[Axis],
     levels: &[ResolutionLevel],
+    placement: Option<&Placement>,
+    channel_windows: Option<&[ChannelWindow]>,
 ) -> Value {
     let image = ome.and_then(|ome| ome.images.get(series_index));
+    // the tile position: the level-0 translation. The other levels carry no
+    // offset of their own relative to level 0, so they get the same one.
+    let translation = placement
+        .and_then(|placement| placement.translation)
+        .map(|zyx| {
+            axes.iter()
+                .map(|axis| match axis.name.as_str() {
+                    "z" => zyx[0],
+                    "y" => zyx[1],
+                    "x" => zyx[2],
+                    _ => 0.0,
+                })
+                .collect::<Vec<_>>()
+        });
     let calibrated = spatial_sizes_calibrated(image);
     let axes_json: Vec<Value> = axes
         .iter()
@@ -206,12 +237,13 @@ pub fn series_attributes(
                     _ => 1.0,
                 })
                 .collect::<Vec<_>>();
+            let mut transforms = vec![json!({ "type": "scale", "scale": scale })];
+            if let Some(translation) = &translation {
+                transforms.push(json!({ "type": "translation", "translation": translation }));
+            }
             json!({
                 "path": level.index.to_string(),
-                "coordinateTransformations": [{
-                    "type": "scale",
-                    "scale": scale,
-                }],
+                "coordinateTransformations": transforms,
             })
         })
         .collect();
@@ -246,10 +278,14 @@ pub fn series_attributes(
     });
 
     if settings.write_omero_metadata {
-        ome_attrs["omero"] = omero_metadata(series_index, meta, ome);
+        ome_attrs["omero"] = omero_metadata(series_index, meta, ome, channel_windows);
     }
 
-    json!({ "ome": ome_attrs })
+    let mut attrs = json!({ "ome": ome_attrs });
+    if let Some(placement) = placement {
+        attrs["img2omezarr"] = json!({ "positions": placement.provenance() });
+    }
+    attrs
 }
 
 #[cfg(feature = "core-bioformats")]
@@ -266,7 +302,7 @@ enum PhysicalAxis {
 /// and one uncalibrated axis makes the others relative too (Bio-Formats labels
 /// ImageJ's z spacing µm whatever its unit), so all are then written unitless.
 #[cfg(feature = "core-bioformats")]
-fn spatial_sizes_calibrated(image: Option<&bioformats_rs::OmeImage>) -> bool {
+pub(crate) fn spatial_sizes_calibrated(image: Option<&bioformats_rs::OmeImage>) -> bool {
     image.is_none_or(|image| {
         image.physical_size_x_unit.is_none()
             && image.physical_size_y_unit.is_none()
@@ -364,7 +400,12 @@ fn display_range(meta: &ImageMetadata) -> (f64, f64) {
 }
 
 #[cfg(feature = "core-bioformats")]
-fn omero_metadata(series_index: usize, meta: &ImageMetadata, ome: Option<&OmeMetadata>) -> Value {
+fn omero_metadata(
+    series_index: usize,
+    meta: &ImageMetadata,
+    ome: Option<&OmeMetadata>,
+    channel_windows: Option<&[ChannelWindow]>,
+) -> Value {
     let channel_count = meta.size_c.max(1) as usize;
     let color_render = channel_count > 1 && channel_count < 8;
     // Camera data is commonly stored in uint16 containers with only 10, 12, or 14 meaningful
@@ -379,6 +420,15 @@ fn omero_metadata(series_index: usize, meta: &ImageMetadata, ome: Option<&OmeMet
                 .and_then(|channel| channel.name.clone())
                 .unwrap_or_else(|| format!("Channel {c}"));
             let color = default_channel_color(c);
+            let window = channel_windows
+                .and_then(|windows| windows.get(c))
+                .copied()
+                .unwrap_or(ChannelWindow {
+                    min: default_range.0,
+                    max: default_range.1,
+                    start: default_range.0,
+                    end: default_range.1,
+                });
             json!({
                 "active": c < 3,
                 "coefficient": 1,
@@ -387,10 +437,10 @@ fn omero_metadata(series_index: usize, meta: &ImageMetadata, ome: Option<&OmeMet
                 "inverted": false,
                 "label": label,
                 "window": {
-                    "start": default_range.0,
-                    "end": default_range.1,
-                    "min": default_range.0,
-                    "max": default_range.1,
+                    "start": window.start,
+                    "end": window.end,
+                    "min": window.min,
+                    "max": window.max,
                 },
             })
         })
@@ -494,7 +544,11 @@ mod tests {
 
         let axes: Vec<Axis> = [AxisName::Z, AxisName::Y, AxisName::X]
             .into_iter()
-            .map(|name| Axis { name, length: 4, chunk: 4 })
+            .map(|name| Axis {
+                name,
+                length: 4,
+                chunk: 4,
+            })
             .collect();
         let levels = [ResolutionLevel {
             index: 0,
@@ -517,8 +571,20 @@ mod tests {
             ..Default::default()
         };
         let attrs = |image: &bioformats_rs::OmeImage| {
-            let ome = OmeMetadata { images: vec![image.clone()], ..Default::default() };
-            series_attributes(&ConversionSettings::default(), 0, &meta, Some(&ome), &axes, &levels)
+            let ome = OmeMetadata {
+                images: vec![image.clone()],
+                ..Default::default()
+            };
+            series_attributes(
+                &ConversionSettings::default(),
+                0,
+                &meta,
+                Some(&ome),
+                &axes,
+                &levels,
+                None,
+                None,
+            )
         };
 
         let uncalibrated = attrs(&image);
@@ -526,12 +592,18 @@ mod tests {
         for axis in multiscale["axes"].as_array().unwrap() {
             assert!(axis.get("unit").is_none(), "{axis}");
         }
-        assert_eq!(multiscale["datasets"][0]["coordinateTransformations"][0]["scale"], json!([2.0, 2.0, 2.0]));
+        assert_eq!(
+            multiscale["datasets"][0]["coordinateTransformations"][0]["scale"],
+            json!([2.0, 2.0, 2.0])
+        );
 
         image.physical_size_x_unit = None;
         image.physical_size_y_unit = None;
         let calibrated = attrs(&image);
-        assert_eq!(calibrated["ome"]["multiscales"][0]["axes"][2]["unit"], "micrometer");
+        assert_eq!(
+            calibrated["ome"]["multiscales"][0]["axes"][2]["unit"],
+            "micrometer"
+        );
     }
 
     #[cfg(feature = "core-bioformats")]
@@ -543,7 +615,7 @@ mod tests {
             size_c: 2,
             ..Default::default()
         };
-        let omero = omero_metadata(0, &meta, None);
+        let omero = omero_metadata(0, &meta, None, None);
         assert_eq!(omero["channels"][0]["window"]["start"], 0.0);
         assert_eq!(omero["channels"][0]["window"]["end"], 4095.0);
         assert_eq!(omero["channels"][1]["window"]["max"], 4095.0);

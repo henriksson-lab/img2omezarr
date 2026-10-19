@@ -127,6 +127,9 @@ pub struct ConversionSettings {
     pub write_omero_metadata: bool,
     pub write_ome_xml: bool,
     pub max_workers: usize,
+    /// Where each image's level-0 translation comes from
+    /// (`docs/tile-positions.md`).
+    pub positions: crate::convert::positions::PositionSettings,
 }
 
 impl Default for ConversionSettings {
@@ -146,6 +149,7 @@ impl Default for ConversionSettings {
             max_workers: std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1),
+            positions: Default::default(),
         }
     }
 }

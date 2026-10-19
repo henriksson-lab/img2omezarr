@@ -23,12 +23,13 @@ use crate::convert::downsample::{downsample_bytes, reduce_depth_bytes};
 use crate::convert::dtype::{bytes_per_sample, zarr_data_type, zarr_v2_data_type};
 use crate::convert::metadata::{
     hcs_image_paths, ome_group_attributes, root_attributes, root_attributes_with_hcs_plate,
-    series_attributes, well_attributes, HcsImagePath,
+    series_attributes, well_attributes, ChannelWindow, HcsImagePath,
 };
 use crate::convert::planner::{
     plan_volume_resolutions, selected_series, source_resolution_level, ResolutionLevel,
     ResolutionSource,
 };
+use crate::convert::positions::Placement;
 use crate::convert::progress::ProgressSink;
 use crate::convert::reader::{plane_index, BioformatsImageSource};
 
@@ -43,10 +44,28 @@ pub fn write_omezarr<P>(
 where
     P: ProgressSink,
 {
+    write_omezarr_placed(source, output, settings, None, progress)
+}
+
+/// [`write_omezarr`] with a tile position per selected series, in the order
+/// the series are selected (`positions::place_batch`).
+pub fn write_omezarr_placed<P>(
+    source: &mut BioformatsImageSource,
+    output: &Path,
+    settings: &ConversionSettings,
+    placements: Option<&[Placement]>,
+    progress: &P,
+) -> anyhow::Result<Vec<usize>>
+where
+    P: ProgressSink,
+{
     validate_version_settings(settings)?;
     prepare_output(output, settings.overwrite)?;
     let store = Arc::new(FilesystemStore::new(output)?);
     let selected = selected_series(&settings.series, source.series_count())?;
+    if placements.is_some_and(|placements| placements.len() != selected.len()) {
+        anyhow::bail!("one tile position per selected series is needed");
+    }
     let collection_ome = source.ome_metadata();
     let hcs_paths = collection_ome
         .as_ref()
@@ -90,7 +109,7 @@ where
 
     let mut written = Vec::with_capacity(selected.len());
     let mut wrote_ome_xml = false;
-    for series in selected {
+    for (position, series) in selected.into_iter().enumerate() {
         source.set_series(series)?;
         source.set_resolution(0)?;
         let meta = source.metadata();
@@ -118,6 +137,7 @@ where
             &meta,
             ome.as_ref(),
             &levels,
+            placements.map(|placements| &placements[position]),
             progress,
         )?;
         written.push(series);
@@ -223,6 +243,7 @@ fn write_series<P>(
     meta: &ImageMetadata,
     ome: Option<&bioformats_rs::OmeMetadata>,
     levels: &[ResolutionLevel],
+    placement: Option<&Placement>,
     progress: &P,
 ) -> anyhow::Result<()>
 where
@@ -246,14 +267,23 @@ where
         settings.tile_width,
         settings.chunk_depth,
     );
-    let attrs = series_attributes(settings, series, meta, ome, &base_axes, levels);
     write_parent_hcs_groups(store, settings.ngff_version, image_path, hcs_paths)?;
     let image_node = if image_path.is_empty() {
         "/".to_owned()
     } else {
         format!("/{image_path}")
     };
-    write_group(store, &image_node, attrs, settings.ngff_version)?;
+
+    // Collect display statistics while level zero is already passing through
+    // the converter. This avoids the extra full-image read used by converters
+    // which calculate rendering metadata in a separate pass.
+    let samples_per_channel = meta.size_t.max(1) as usize
+        * meta.size_z.max(1) as usize
+        * meta.size_y.max(1) as usize
+        * meta.size_x.max(1) as usize;
+    let mut channel_statistics = (0..meta.size_c.max(1))
+        .map(|_| ChannelStatistics::new(samples_per_channel))
+        .collect::<Vec<_>>();
 
     let mut done = 0usize;
     for level in levels {
@@ -293,8 +323,32 @@ where
             &mut done,
             total_chunks,
             progress,
+            &mut channel_statistics,
         )?;
     }
+
+    // ImageJ's description has one window rather than one per channel. It is
+    // unambiguous for a single-channel image; multichannel data uses the
+    // independently measured channel statistics below.
+    let source_window = (meta.size_c.max(1) == 1)
+        .then(|| source_display_window(ome.and_then(|ome| ome.images.get(series))))
+        .flatten();
+    let fallback = fallback_display_range(meta);
+    let channel_windows = channel_statistics
+        .iter()
+        .map(|statistics| statistics.window(source_window, fallback))
+        .collect::<Vec<_>>();
+    let attrs = series_attributes(
+        settings,
+        series,
+        meta,
+        ome,
+        &base_axes,
+        levels,
+        placement,
+        Some(&channel_windows),
+    );
+    write_group(store, &image_node, attrs, settings.ngff_version)?;
     Ok(())
 }
 
@@ -309,6 +363,7 @@ fn write_level<P>(
     done: &mut usize,
     total_chunks: usize,
     progress: &P,
+    channel_statistics: &mut [ChannelStatistics],
 ) -> anyhow::Result<()>
 where
     P: ProgressSink,
@@ -347,6 +402,13 @@ where
                             t,
                             bps,
                         )?;
+                        if level.index == 0 {
+                            channel_statistics[c].observe_bytes(
+                                &bytes,
+                                meta.pixel_type,
+                                meta.is_little_endian,
+                            );
+                        }
                         let origin = [t as u64, c as u64, z0 as u64, y as u64, x as u64];
                         let region_shape = [1usize, 1, depth, height, width];
                         write_bytes_region(
@@ -365,6 +427,152 @@ where
         }
     }
     Ok(())
+}
+
+const MAX_DISPLAY_SAMPLES: usize = 1_048_576;
+
+#[derive(Debug)]
+struct ChannelStatistics {
+    min: f64,
+    max: f64,
+    seen: usize,
+    sample_stride: usize,
+    samples: Vec<f64>,
+}
+
+impl ChannelStatistics {
+    fn new(total_values: usize) -> Self {
+        Self {
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            seen: 0,
+            sample_stride: total_values.div_ceil(MAX_DISPLAY_SAMPLES).max(1),
+            samples: Vec::with_capacity(total_values.min(MAX_DISPLAY_SAMPLES)),
+        }
+    }
+
+    fn observe(&mut self, value: f64) {
+        let sample_this = self.seen % self.sample_stride == 0;
+        self.seen += 1;
+        if !value.is_finite() {
+            return;
+        }
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        if sample_this && self.samples.len() < MAX_DISPLAY_SAMPLES {
+            self.samples.push(value);
+        }
+    }
+
+    fn observe_bytes(&mut self, bytes: &[u8], pixel_type: PixelType, little_endian: bool) {
+        macro_rules! observe_values {
+            ($values:expr) => {
+                for value in $values {
+                    self.observe(value as f64);
+                }
+            };
+        }
+        match pixel_type {
+            PixelType::Bit | PixelType::Uint8 => observe_values!(bytes.iter().copied()),
+            PixelType::Int8 => observe_values!(bytes.iter().map(|value| *value as i8)),
+            PixelType::Int16 => observe_values!(bytes_to_i16(bytes, little_endian)),
+            PixelType::Uint16 => observe_values!(bytes_to_u16(bytes, little_endian)),
+            PixelType::Int32 => observe_values!(bytes_to_i32(bytes, little_endian)),
+            PixelType::Uint32 => observe_values!(bytes_to_u32(bytes, little_endian)),
+            PixelType::Float32 => observe_values!(bytes_to_f32(bytes, little_endian)),
+            PixelType::Float64 => observe_values!(bytes_to_f64(bytes, little_endian)),
+        }
+    }
+
+    fn window(&self, source: Option<(f64, f64)>, fallback: (f64, f64)) -> ChannelWindow {
+        if !self.min.is_finite() || !self.max.is_finite() {
+            return ChannelWindow {
+                min: fallback.0,
+                max: fallback.1,
+                start: fallback.0,
+                end: fallback.1,
+            };
+        }
+        let (start, end) = source.unwrap_or_else(|| self.auto_contrast());
+        ChannelWindow {
+            min: self.min.min(start),
+            max: self.max.max(end),
+            start,
+            end,
+        }
+    }
+
+    /// Fiji/ImageJ's 256-bin auto contrast rule, also used by ome-zarr-io.
+    fn auto_contrast(&self) -> (f64, f64) {
+        if self.min >= self.max || self.samples.is_empty() {
+            return (self.min, self.max);
+        }
+        let mut histogram = [0usize; 256];
+        let width = (self.max - self.min) / 256.0;
+        for &value in &self.samples {
+            let bin = (((value - self.min) / width).floor() as usize).min(255);
+            histogram[bin] += 1;
+        }
+        let limit = self.samples.len() / 10;
+        let threshold = self.samples.len() / 5000;
+        let hits = histogram
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count <= limit && **count > threshold)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        match (hits.first(), hits.last()) {
+            (Some(first), Some(last)) if first < last => (
+                self.min + *first as f64 * width,
+                self.min + *last as f64 * width,
+            ),
+            _ => (self.min, self.max),
+        }
+    }
+}
+
+fn fallback_display_range(meta: &ImageMetadata) -> (f64, f64) {
+    use crate::convert::dtype::pixel_range;
+    let storage_range = pixel_range(meta.pixel_type).unwrap_or((0.0, 1.0));
+    let bits = u32::from(meta.bits_per_pixel);
+    let storage_bits = u32::try_from(meta.pixel_type.bytes_per_sample() * 8).unwrap_or(u32::MAX);
+    if bits == 0 || bits >= storage_bits || bits > 32 {
+        return storage_range;
+    }
+    match meta.pixel_type {
+        PixelType::Bit | PixelType::Uint8 | PixelType::Uint16 | PixelType::Uint32 => {
+            (0.0, ((1_u64 << bits) - 1) as f64)
+        }
+        PixelType::Int8 | PixelType::Int16 | PixelType::Int32 => {
+            let magnitude = 1_i64 << (bits - 1);
+            (-magnitude as f64, (magnitude - 1) as f64)
+        }
+        PixelType::Float32 | PixelType::Float64 => storage_range,
+    }
+}
+
+/// Preserve ImageJ's explicit display window when Bio-Formats carries it in
+/// the image description. This is source intent, whereas the statistics above
+/// are the general fallback for formats without rendering metadata.
+fn source_display_window(image: Option<&bioformats_rs::OmeImage>) -> Option<(f64, f64)> {
+    let description = image?.description.as_deref()?;
+    if !description
+        .split([';', '\n'])
+        .any(|field| field.trim().starts_with("ImageJ="))
+    {
+        return None;
+    }
+    let field = |name: &str| {
+        description
+            .split([';', '\n'])
+            .map(str::trim)
+            .find_map(|field| field.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    };
+    let start = field("min=")?;
+    let end = field("max=")?;
+    (start < end).then_some((start, end))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -391,18 +599,20 @@ fn read_chunk_bytes(
         let source_depth = scale_z.min(meta.size_z.max(1) as usize - source_z0);
         let mut planes = Vec::with_capacity(width * height * source_depth * bps);
         for source_z in source_z0..source_z0 + source_depth {
+            let rgb = rgb_samples(meta);
             let plane = plane_index(
                 meta.dimension_order,
                 source_z as u32,
-                c as u32,
+                (c / rgb) as u32,
                 t as u32,
                 meta.size_z.max(1),
-                meta.size_c.max(1),
+                (meta.size_c.max(1) as usize / rgb) as u32,
                 meta.size_t.max(1),
             );
             if matches!(level.source, ResolutionSource::Source(_)) || level.index == 0 {
                 let plane_bytes =
                     source.open_region(plane, x as u32, y as u32, width as u32, height as u32)?;
+                let plane_bytes = extract_rgb_sample(meta, plane_bytes, c % rgb, rgb, bps);
                 planes.extend_from_slice(&plane_bytes);
             } else {
                 let sx = x * scale_xy;
@@ -411,6 +621,7 @@ fn read_chunk_bytes(
                 let sh = (height * scale_xy).min(meta.size_y as usize - sy);
                 let plane_bytes =
                     source.open_region(plane, sx as u32, sy as u32, sw as u32, sh as u32)?;
+                let plane_bytes = extract_rgb_sample(meta, plane_bytes, c % rgb, rgb, bps);
                 planes.extend(downsample_bytes(
                     &plane_bytes,
                     sw,
@@ -432,6 +643,40 @@ fn read_chunk_bytes(
         ));
     }
     Ok(out)
+}
+
+/// Samples per plane: an RGB plane carries several channels at once.
+fn rgb_samples(meta: &ImageMetadata) -> usize {
+    if !meta.is_rgb {
+        return 1;
+    }
+    let planes = meta.image_count.max(1) as usize;
+    let total = (meta.size_z.max(1) * meta.size_c.max(1) * meta.size_t.max(1)) as usize;
+    (total / planes).max(1)
+}
+
+/// Pull channel `sample` out of an RGB region (interleaved or planar).
+fn extract_rgb_sample(
+    meta: &ImageMetadata,
+    bytes: Vec<u8>,
+    sample: usize,
+    rgb: usize,
+    bps: usize,
+) -> Vec<u8> {
+    if rgb == 1 {
+        return bytes;
+    }
+    let pixels = bytes.len() / (rgb * bps);
+    if meta.is_interleaved {
+        let mut out = Vec::with_capacity(pixels * bps);
+        for i in 0..pixels {
+            let at = (i * rgb + sample) * bps;
+            out.extend_from_slice(&bytes[at..at + bps]);
+        }
+        out
+    } else {
+        bytes[sample * pixels * bps..(sample + 1) * pixels * bps].to_vec()
+    }
 }
 
 fn write_group(
@@ -479,6 +724,15 @@ fn legacy_ngff_attributes(attributes: serde_json::Value) -> serde_json::Value {
         return attributes;
     };
     ome.remove("version");
+    // NGFF 0.4 has no `ome` key: its contents are the attributes, beside any
+    // others (the `img2omezarr` provenance)
+    if let Some(others) = attributes.as_object() {
+        for (key, value) in others {
+            if key != "ome" {
+                ome.insert(key.clone(), value.clone());
+            }
+        }
+    }
     if let Some(plate) = ome.get_mut("plate").and_then(|plate| plate.as_object_mut()) {
         plate.remove("version");
     }
@@ -799,3 +1053,52 @@ bytes_to_num!(bytes_to_i32, i32, 4);
 bytes_to_num!(bytes_to_u32, u32, 4);
 bytes_to_num!(bytes_to_f32, f32, 4);
 bytes_to_num!(bytes_to_f64, f64, 8);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observed_bounds_and_auto_contrast_ignore_sparse_outliers() {
+        let mut statistics = ChannelStatistics::new(40_003);
+        statistics.observe(0.0);
+        for value in 10_000..=50_000 {
+            statistics.observe(value as f64);
+        }
+        statistics.observe(65_535.0);
+
+        let window = statistics.window(None, (0.0, 65_535.0));
+        assert_eq!((window.min, window.max), (0.0, 65_535.0));
+        assert!(
+            window.start >= 9_500.0 && window.start <= 10_500.0,
+            "{window:?}"
+        );
+        assert!(
+            window.end >= 49_000.0 && window.end <= 50_500.0,
+            "{window:?}"
+        );
+    }
+
+    #[test]
+    fn imagej_display_window_is_preserved_and_bounds_contain_it() {
+        let image = bioformats_rs::OmeImage {
+            description: Some("ImageJ=1.54p; unit=um; min=67.0; max=427.0;".into()),
+            ..Default::default()
+        };
+        assert_eq!(source_display_window(Some(&image)), Some((67.0, 427.0)));
+
+        let mut statistics = ChannelStatistics::new(2);
+        statistics.observe(69.0);
+        statistics.observe(420.0);
+        let window = statistics.window(source_display_window(Some(&image)), (0.0, 65_535.0));
+        assert_eq!(
+            window,
+            ChannelWindow {
+                min: 67.0,
+                max: 427.0,
+                start: 67.0,
+                end: 427.0
+            }
+        );
+    }
+}

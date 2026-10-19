@@ -5,6 +5,9 @@ use img2omezarr::convert::config::{
     CompressionCodec, CompressionSettings, ConversionSettings, ConvertJob, Downsampling,
     NgffVersion, OutputTarget, ResolutionPolicy, SeriesSelection, UploadTarget,
 };
+use img2omezarr::convert::positions::{
+    self, GridSpec, GridStep, LengthUnit, PositionSettings, StageAxes,
+};
 use img2omezarr::convert::progress::ProgressSink;
 
 #[derive(Debug, Parser)]
@@ -19,6 +22,9 @@ enum Command {
     Convert(ConvertArgs),
     Batch(BatchArgs),
     Inspect(InspectArgs),
+    /// Write tile positions into existing OME-Zarr images (only their
+    /// zarr.json/.zattrs; no chunk data). See docs/tile-positions.md.
+    SetPositions(SetPositionsArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -33,6 +39,11 @@ struct ConvertArgs {
     s3_endpoint: Option<String>,
     #[command(flatten)]
     settings: SettingsArgs,
+    #[command(flatten)]
+    positions: PositionArgs,
+    /// Write no tile translation (the attributes record that).
+    #[arg(long, conflicts_with_all = ["positions", "overlap", "pitch", "stage_axes"])]
+    no_positions: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -48,6 +59,131 @@ struct BatchArgs {
     inputs: Vec<PathBuf>,
     #[command(flatten)]
     settings: SettingsArgs,
+    #[command(flatten)]
+    positions: PositionArgs,
+    /// Write no tile translations (the attributes record that).
+    #[arg(long, conflicts_with_all = ["positions", "overlap", "pitch", "stage_axes"])]
+    no_positions: bool,
+}
+
+#[derive(Debug, Parser)]
+struct SetPositionsArgs {
+    /// OME-Zarr images (or bioformats2raw collections, one tile per series).
+    #[arg(required = true)]
+    images: Vec<PathBuf>,
+    #[command(flatten)]
+    positions: PositionArgs,
+    /// Read positions from the files the images were converted from, in
+    /// DIR, matched by name (or grid index): their LaVision metadata. Only
+    /// each file's first TIFF directory is read.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["positions", "overlap", "pitch"])]
+    from_originals: Option<PathBuf>,
+    /// With --from-originals: only files whose name matches REGEX.
+    #[arg(long, value_name = "REGEX", requires = "from_originals")]
+    originals_match: Option<String>,
+    /// Print the positions without writing them.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+/// Where tile positions come from (docs/tile-positions.md). Without
+/// `--positions` or `--overlap`/`--pitch`, `convert` uses the reader's OME
+/// Plane/StageLabel positions.
+#[derive(Debug, Clone, clap::Args)]
+struct PositionArgs {
+    /// A CSV table of positions: header `image,series,z,y,x,unit`.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["overlap", "pitch"])]
+    positions: Option<PathBuf>,
+    /// Grid source: a regex with named groups `row` and `col`; the last
+    /// match in each name counts. Default: `<row> x <column>`, as in
+    /// tile_03x04 and [03 x 04].
+    #[arg(long, value_name = "REGEX", requires = "grid_unit")]
+    grid_pattern: Option<String>,
+    /// Grid source: the overlap of neighbouring tiles, ROW,COLUMN (one value
+    /// for both), in --grid-unit.
+    #[arg(
+        long,
+        value_name = "ROW,COLUMN",
+        conflicts_with = "pitch",
+        requires = "grid_unit"
+    )]
+    overlap: Option<String>,
+    /// Grid source: the distance between neighbouring tiles, ROW,COLUMN (one
+    /// value for both), in --grid-unit.
+    #[arg(long, value_name = "ROW,COLUMN", requires = "grid_unit")]
+    pitch: Option<String>,
+    /// The unit of --overlap/--pitch: voxel (level-0 voxels) or a length
+    /// (micrometer, um, nm, mm, ...).
+    #[arg(long, value_name = "UNIT")]
+    grid_unit: Option<String>,
+    /// The image axes rows and columns run along, with signs.
+    #[arg(long, value_name = "AXES", default_value = "y,x")]
+    grid_axes: String,
+    /// For image axes x,y,z, the stage axis (signed) that gives each, e.g.
+    /// x,-y,z. Default: the source's own (x,y,z for OME planes and tables,
+    /// x,-y,-z for LaVision).
+    #[arg(long, value_name = "AXES")]
+    stage_axes: Option<String>,
+    /// Write positions that fail the sanity checks (duplicates, gaps,
+    /// overlaps beyond the tile).
+    #[arg(long)]
+    force: bool,
+}
+
+impl PositionArgs {
+    fn to_settings(&self, disabled: bool) -> anyhow::Result<PositionSettings> {
+        let step = match (&self.overlap, &self.pitch) {
+            (Some(overlap), None) => Some(GridStep::Overlap(pair(overlap, "--overlap")?)),
+            (None, Some(pitch)) => Some(GridStep::Pitch(pair(pitch, "--pitch")?)),
+            (None, None) if self.grid_pattern.is_some() => {
+                anyhow::bail!("--grid-pattern needs --overlap or --pitch")
+            }
+            _ => None,
+        };
+        let grid = step
+            .map(|step| {
+                let unit = self
+                    .grid_unit
+                    .as_deref()
+                    .expect("clap requires --grid-unit");
+                GridSpec::new(
+                    self.grid_pattern.as_deref(),
+                    step,
+                    LengthUnit::parse(unit)?,
+                    Some(&self.grid_axes),
+                )
+            })
+            .transpose()?;
+        if grid.is_none() && self.grid_unit.is_some() {
+            anyhow::bail!("--grid-unit is for --overlap or --pitch");
+        }
+        Ok(PositionSettings {
+            table: self.positions.clone(),
+            grid,
+            stage_axes: self
+                .stage_axes
+                .as_deref()
+                .map(StageAxes::parse)
+                .transpose()?,
+            force: self.force,
+            disabled,
+            originals: None,
+        })
+    }
+}
+
+/// `A,B`, or one value for both.
+fn pair(text: &str, flag: &str) -> anyhow::Result<[f64; 2]> {
+    let values = text
+        .split(',')
+        .map(|part| part.trim().parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("{flag} takes ROW,COLUMN numbers, got `{text}`"))?;
+    match values.as_slice() {
+        [both] => Ok([*both, *both]),
+        [row, column] => Ok([*row, *column]),
+        _ => anyhow::bail!("{flag} takes one or two numbers, got `{text}`"),
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -198,6 +334,10 @@ impl ProgressSink for CliProgress {
     fn job_finished(&self, _index: usize, output: &std::path::Path) {
         eprintln!("wrote {}", output.display());
     }
+
+    fn message(&self, message: &str) {
+        eprintln!("warning: {message}");
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -208,7 +348,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Convert(args) => {
-            let settings = args.settings.to_settings()?;
+            let mut settings = args.settings.to_settings()?;
+            settings.positions = args.positions.to_settings(args.no_positions)?;
             let output = output_target(
                 args.output,
                 args.upload_local,
@@ -225,7 +366,8 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         Command::Batch(args) => {
-            let settings = args.settings.to_settings()?;
+            let mut settings = args.settings.to_settings()?;
+            settings.positions = args.positions.to_settings(args.no_positions)?;
             let jobs = args
                 .inputs
                 .into_iter()
@@ -250,6 +392,42 @@ fn main() -> anyhow::Result<()> {
             img2omezarr::convert::convert_many(jobs, settings, CliProgress)?;
         }
         Command::Inspect(args) => inspect_input(&args.input, args.format)?,
+        Command::SetPositions(args) => set_positions(&args)?,
+    }
+    Ok(())
+}
+
+fn set_positions(args: &SetPositionsArgs) -> anyhow::Result<()> {
+    let mut settings = args.positions.to_settings(false)?;
+    settings.originals = args
+        .from_originals
+        .as_ref()
+        .map(|dir| -> anyhow::Result<_> {
+            Ok(positions::Originals {
+                dir: dir.clone(),
+                matching: args
+                    .originals_match
+                    .as_deref()
+                    .map(regex::Regex::new)
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    let placed =
+        positions::zarr::set_positions(&args.images, &settings, args.dry_run, &|message| {
+            eprintln!("warning: {message}");
+        })?;
+    for (image, placement) in &placed {
+        let unit = image.tile.units[2].as_deref().unwrap_or("(no unit)");
+        let translation = placement
+            .translation
+            .map(|t| format!("z {} y {} x {} {unit}", t[0], t[1], t[2]))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "{}: {translation} ({})",
+            image.tile.label(),
+            placement.source
+        );
     }
     Ok(())
 }
